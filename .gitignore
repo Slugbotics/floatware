@@ -1,0 +1,7 @@
+/.vscode
+/.embuild
+/target
+/Cargo.lock
+
+# Each copy of the Espressif Rust ecosystem is personalized to its owner
+export-esp.sh

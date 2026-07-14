@@ -10,11 +10,13 @@ We are using the [esp-idf-template](https://github.com/esp-rs/esp-idf-template).
 
 3. `$ rustup default stable`
 
-4. `$ cargo install cargo-generate ldproxy espflash cargo-espflash espup --locked`
+4. `$ cargo install ldproxy espflash cargo-espflash espup --locked`
 
 5. `$ ~/.cargo/bin/espup install -t esp32,esp32c3 -f export-esp.sh`
 
 6. `$ . export-esp.sh` (MUST BE RUN EVERYTIME A NEW TERMINAL IS IN USE)
+
+TODO: The CI script manages to build the binary without doing all these steps. Figure out how.
 
 # Building
 

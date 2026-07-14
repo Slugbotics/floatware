@@ -1,0 +1,40 @@
+### Goals of the floatware (float firmware):
+- Communicate over WiFi via HTTP server
+	- Send data packets containing:
+		- Timestamp
+		- Time since dive start(?)
+		- General system status
+		- Pressure
+		- IMU information?
+	- Receive data packets containing:
+		- Time synchronization data
+		- Course charter
+		- General system config flags
+		- Start/stop/reboot etc.
+	- There will be multiple types of data packets, I imagine in particular the outbound ones will have multiple types
+	- Good reason for ESP to be the HTTP *server* (as opposed to client to a topside server): there is no specific data packet that needs to be pushed to the client at a precise time
+- Maintain a persistent data store on an SD card
+	- Probably via FAT fs accessed through MMC drivers (ideally - if esp-idf-sys supports it; otherwise SPI which *may* be suboptimal due to SPI-I2C timing collisions; not saying that this is a problem that will happen but I have seen it in other environments)
+- Leak sensor loop: read value of leak sensor and initiate emergency shutdown if true
+	- Ideally research how to impl in hardware
+- Pressure measurement: sample on regular basis, store in memory (to be read by SD synchronizer & web server)
+- Status LED: indicate conditions; we have full RGB so we can do a lot, perhaps:
+	- white = standby
+	- dark blue = sinking
+	- green = holding position
+	- yellow = rising
+	- perhaps pulse pink on TX/RX
+	- red = error obviously
+- Stepper control: takes in ballast target size instructions & translates to stepper motion
+- Bouyancy loop: uses currently measured depth and target depth to determine how much to change the ballast tank levels
+- Charter control - adjusts target depth based on predetermined plan
+
+### `main` initial setup
+- Stepper (GPIO, possibly communication protocol e.g. I2C, external controller init as needed)
+- Pressure sensor (ditto)
+- Status LED (GPIO)
+- SD card (GPIO, MMC/SPI, FS)
+- Onboard flash key-value store, needed for wireless, also may be a good way to store data in conjunction with SD??
+- WiFi (read network settings from SD card perhaps)
+- HTTP server (ditto)
+- Spawn loops to handle the above

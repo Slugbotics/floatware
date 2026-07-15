@@ -13,8 +13,9 @@
 		- Start/stop/reboot etc.
 	- There will be multiple types of data packets, I imagine in particular the outbound ones will have multiple types
 	- Good reason for ESP to be the HTTP *server* (as opposed to client to a topside server): there is no specific data packet that needs to be pushed to the client at a precise time
+	- Data packet format: probably MessagePack because the leading Rust serialization library (serde) [supports it](https://github.com/3Hren/msgpack-rust) and [so does Python](https://github.com/msgpack/msgpack-python), it's compact & efficient
 - Maintain a persistent data store on an SD card
-	- Probably via FAT fs accessed through MMC drivers (ideally - if esp-idf-sys supports it; otherwise SPI which *may* be suboptimal due to SPI-I2C timing collisions; not saying that this is a problem that will happen but I have seen it in other environments)
+	- Probably via FAT fs accessed through MMC drivers (ideally - if esp-idf-sys supports it; otherwise SPI which *may* be suboptimal due to SPI-I2C timing collisions; not saying that this is a problem that will happen but I have seen it in other environments, also SPI is allegedly slower)
 - Leak sensor loop: read value of leak sensor and initiate emergency shutdown if true
 	- Ideally research how to impl in hardware
 - Pressure measurement: sample on regular basis, store in memory (to be read by SD synchronizer & web server)
@@ -35,6 +36,8 @@
 - Status LED (GPIO)
 - SD card (GPIO, MMC/SPI, FS)
 - Onboard flash key-value store, needed for wireless, also may be a good way to store data in conjunction with SD??
+- IMU (onboard I2C)
+- Temperature & humidity sensor (onboard I2C) (not strictly necessary but it's eeffoc)
 - WiFi (read network settings from SD card perhaps)
 - HTTP server (ditto)
 - Spawn loops to handle the above

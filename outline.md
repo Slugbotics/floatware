@@ -51,8 +51,6 @@ implemented as a looping and waiting esp task
 I haven't yet looked into what the system interfaces (I2C, GPIO, ADC, etc.) look like and if multiple different threads
 can access them concurrently, we may need synchronizing wrappers
 
-- WiFi may or may not require an explicit module that handles requests with some boilerplate, it's not clear yet
-	- Service dependencies: WiFi (maybe)
 - HTTP module that handles incoming requests
 	- Shared reads: pressure log, IMU, T&H, power stats
 	- Shared writes: time synchronization data, general config & state, course charter

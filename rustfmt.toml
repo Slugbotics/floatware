@@ -1,0 +1,10 @@
+# I am willing to incorporate changes to this file because I know that different people have different opinions on code
+# style. But I will NOT budge on tabs. We will use tabs. There is no good reason to use spaces, ever.
+
+# https://github.com/rust-lang/rustfmt/blob/main/Configurations.md
+
+hard_tabs = true
+overflow_delimited_expr = true
+imports_granularity = "Crate"
+reorder_imports = false
+newline_style = "Unix"

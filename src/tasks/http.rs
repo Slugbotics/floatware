@@ -14,102 +14,144 @@
 //!
 //! TODO: once I am done testing things with JSON typed into curl, port to MessagePack
 
-use crate::{tasks::led::_SerdeRGB8, signals::{LedSignal, ShutdownSignal}};
-
-use std::sync::Arc;
+use crate::{
+	prelude::*,
+	set_boot_time, 
+	tasks::{
+		i2c::I2cCommand,
+		charter::CharterState,
+		shutdown::ShutdownRequest
+	}
+};
 
 use esp_idf_svc::{
 	http::server::{
-		Configuration as HttpServerConfiguration,
 		EspHttpConnection,
 		EspHttpServer
 	},
-	io::EspIOError
+	io::EspIOError,
+	hal::task::block_on
 };
 
 use embedded_svc::{
 	http::server::{
-		CompositeHandler, Handler, Middleware, Request
+		CompositeHandler, Handler, Middleware, Connection
 	},
 	http::{
 		Headers, Method
 	},
 	io::{
-		Read, Write
+		Read
 	}
 };
-
-use anyhow::Error as AnyhowError;
-use embedded_svc::http::server::Connection;
-use log::{error, info};
 
 ////////////////////////////////////////////////////////////////////////////////
 
 pub fn initialize_http_server<'server>(
-	led_signal: Arc<LedSignal>,
-	shutdown_signal: Arc<ShutdownSignal>,
+	shutdown_signal_sender: &'static ShutdownSignal,
+	i2c_sender: I2cSender<'static>,
+	charter_state_sender: CharterStateSender<'static>
 ) -> Result<EspHttpServer<'server>, EspIOError> {
-	let mut server = EspHttpServer::new(&HttpServerConfiguration {
-		..Default::default()
-	})?;
+	let mut server = EspHttpServer::new(&Default::default())?;
 
-	server.fn_handler("/status",   Method::Get,  http_handle_status)?;
-	server.fn_handler("/config",   Method::Post, http_handle_config)?;
-	server.   handler("/shutdown", Method::Post, pep(PostShutdown { shutdown_signal }))?;
-	server.   handler("/led",      Method::Post, pep(PostLed { led_signal }))?;
+	server
+		.handler("/heartbeat",  Method::Get,  GetHeartbeat)?
+		.handler("/status",     Method::Get,  pep(GetStatus { i2c_sender }))?
+		.handler("/config",     Method::Post, pep(PostConfig {}))?
+		.handler("/shutdown",   Method::Post, pep(PostShutdown { shutdown_signal_sender }))?
+		.handler("/start_dive", Method::Post, pep(PostStartDive { charter_state_sender }))?
+		.handler("/time_sync",  Method::Post, pep(PostTimeSync))?
+	;
 
 	Ok(server)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 
-fn http_handle_status(req: Request<&mut EspHttpConnection>) -> Result<(), EspIOError> {
-	//! TODO
-	req.into_ok_response()?
-		.write_all("Hello, client!\n".as_bytes())
+// TODO: Maybe make a macro that generates these structs?
+
+/// Noop req. We don't use PlainErrorPage to make handling the connection faster.
+struct GetHeartbeat;
+impl<'request> Handler<EspHttpConnection<'request>> for GetHeartbeat {
+	type Error = AnyhowError;
+
+	fn handle(&self, conn: &mut EspHttpConnection) -> Result<(), AnyhowError> {
+		reply_204(conn)
+	}
 }
 
-fn http_handle_config(req: Request<&mut EspHttpConnection>) -> Result<(), AnyhowError> {
-	//! TODO
-	req.into_status_response(204)?;
-	Ok(())
+struct GetStatus { i2c_sender: I2cSender<'static> }
+impl<'request> Handler<EspHttpConnection<'request>> for GetStatus {
+	type Error = AnyhowError;
+
+	fn handle(&self, conn: &mut EspHttpConnection) -> Result<(), AnyhowError> {
+		info!("Handling request");
+
+		let (response, receiver) = futures::channel::oneshot::channel();
+		if self.i2c_sender.try_send(I2cCommand::GetTH {
+			response
+		}).is_err() {
+			return Err(AnyhowError::msg("I2C channel is full"));
+		}
+
+		info!("Sent i2c req");
+
+		let th = block_on(receiver)?;
+
+		info!("Received {th:?}");
+
+		reply(conn, 200, format!("Temp: {} C, Humidity: {}%\n", th.celsius, th.relative_humidity))
+	}
 }
 
-struct PostShutdown { shutdown_signal: Arc<ShutdownSignal> }
+struct PostTimeSync;
+impl<'request> Handler<EspHttpConnection<'request>> for PostTimeSync {
+	type Error = AnyhowError;
+
+	fn handle(&self, conn: &mut EspHttpConnection) -> Result<(), AnyhowError> {
+		// The control station will have to account for connection latency
+		set_boot_time(serde_json::from_slice(read_body(conn)?.as_slice())?);
+
+		reply_204(conn)
+	}
+}
+
+// TODO: figure out what the `'request` lifetime actually represents: request or handler?
+struct PostConfig { }
+impl<'request> Handler<EspHttpConnection<'request>> for PostConfig {
+	type Error = AnyhowError;
+
+	fn handle(&self, conn: &mut EspHttpConnection) -> Result<(), AnyhowError> {
+		//! TODO
+		reply_204(conn)
+	}
+}
+
+struct PostStartDive { charter_state_sender: CharterStateSender<'static> }
+impl<'request> Handler<EspHttpConnection<'request>> for PostStartDive {
+	type Error = AnyhowError;
+
+	fn handle(&self, conn: &mut EspHttpConnection) -> Result<(), AnyhowError> {
+		info!("Got request to POST /start_dive");
+
+		self.charter_state_sender.send(CharterState::StartRequested);
+
+		reply_204(conn)
+	}
+}
+
+struct PostShutdown { shutdown_signal_sender: &'static ShutdownSignal }
 impl<'request> Handler<EspHttpConnection<'request>> for PostShutdown {
 	type Error = AnyhowError;
 
 	fn handle(&self, conn: &mut EspHttpConnection) -> Result<(), AnyhowError> {
-		self.shutdown_signal.signal(());
+		self.shutdown_signal_sender.signal(ShutdownRequest { originator: "http request", go_to_surface: true });
 
-		conn.initiate_response(204, None, &[])
-			.map_err(AnyhowError::from)
+		reply_204(conn)
 	}
 }
 
-struct PostLed { led_signal: Arc<LedSignal> }
-impl<'request> Handler<EspHttpConnection<'request>> for PostLed {
-	type Error = AnyhowError;
-
-	fn handle(&self, conn: &mut EspHttpConnection) -> Result<(), AnyhowError> {
-		let buf = read_body(conn)?;
-
-		let json = str::from_utf8(buf.as_slice())?;
-
-		info!("Got request: {json}");
-
-		self.led_signal.signal(
-			_SerdeRGB8::deserialize(
-				&mut serde_json::Deserializer::from_str(
-					&json
-				)
-			)?
-		);
-
-		conn.initiate_response(204, None, &[])
-			.map_err(AnyhowError::from)
-	}
-}
+////////////////////////////////////////////////////////////////////////////////
 
 fn read_body(conn: &mut EspHttpConnection) -> Result<Vec<u8>, AnyhowError> {
 	// Construct a buffer with the exact size of the request data
@@ -120,10 +162,21 @@ fn read_body(conn: &mut EspHttpConnection) -> Result<Vec<u8>, AnyhowError> {
 	}
 }
 
-////////////////////////////////////////////////////////////////////////////////
+fn reply_204(conn: &mut EspHttpConnection) -> Result<(), AnyhowError> {
+	conn.initiate_response(204, None, &[])
+		.map_err(AnyhowError::from)
+}
+
+fn reply(conn: &mut EspHttpConnection, code: u16, content: String) -> Result<(), AnyhowError> {
+	conn.initiate_response(code, None, &[("Content-Type", "text/plain; charset=utf-8")])?;
+
+	conn.write_all(content.as_bytes())?;
+
+	Ok(())
+}
 
 /// The default error page is a bunch of unnecessary HTML; make it better
-struct PlainErrorPage /* : Middleware */;
+struct PlainErrorPage;
 
 impl<'request, H: Handler<EspHttpConnection<'request>, Error = AnyhowError>>
 Middleware<EspHttpConnection<'request>, H> for PlainErrorPage {

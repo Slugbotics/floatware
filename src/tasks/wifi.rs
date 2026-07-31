@@ -1,4 +1,4 @@
-use std::convert::TryInto;
+use crate::prelude::*;
 
 use esp_idf_svc::{
 	hal::modem::Modem,
@@ -8,22 +8,18 @@ use esp_idf_svc::{
 	wifi::{AsyncWifi, EspWifi},
 };
 
-use anyhow::Error as AnyhowError;
-
 use embedded_svc::wifi::{AccessPointConfiguration, AuthMethod, Configuration as WifiConfiguration};
-
-use log::{error, info};
 
 ////////////////////////////////////////////////////////////////////////////////
 
-/// Self-explanatory name. Takes ownership of the modem. I don't know what the
-/// lifetime specifiers mean and at this point I'm too afraid to ask.
-/// TODO: convert hardcoded SSID & pass to external config
+/// Setup Wi-Fi network. Returns a Wi-Fi handle, which needs to be kept alive.
 pub async fn initialize_wifi<'a>(
 	modem: Modem<'a>,
 	sys_loop: &EspSystemEventLoop,
 	timer_service: &EspTaskTimerService,
 	nvs: &EspNvsPartition<NvsDefault>,
+	ssid: heapless::String<32>,
+	password: heapless::String<64>,
 ) -> Result<AsyncWifi<EspWifi<'a>>, AnyhowError> {
 	let mut wifi = AsyncWifi::wrap(
 		EspWifi::new(modem, sys_loop.clone(), Some(nvs.clone()))?,
@@ -31,26 +27,24 @@ pub async fn initialize_wifi<'a>(
 		timer_service.clone(),
 	)?;
 
-	wifi.start().await?;
+	wifi.start().await.map_err(damn!("Error starting Wifi service"))?;
 	info!("Wifi service started");
 
+	// Create this earlier because the config struct takes ownership
+	let format_string = format!("SSID `{ssid}', password `{password}'");
+
 	wifi.set_configuration(&WifiConfiguration::AccessPoint(AccessPointConfiguration {
-		ssid: "ESP".try_into().unwrap(),
-		password: "floatware".try_into().unwrap(),
-		auth_method: AuthMethod::WPA2Personal,
+		ssid, password, auth_method: AuthMethod::WPA2Personal,
 		..Default::default()
-	}))?;
+	})).map_err(damn!("Wifi configuration failure"))?;
 
-	wifi.wait_netif_up().await?;
+	wifi.wait_netif_up().await
+		.map_err(damn!("Wifi network await failure"))?;
 
-	match wifi.wifi().ap_netif().get_ip_info() {
-		Ok(info) => {
-			info!("Network up, with gateway IP {}", info.ip);
-			Ok(wifi)
-		},
-		Err(err) => {
-			error!("Failed to get IP information");
-			Err(AnyhowError::from(err))
-		},
-	}
+	let ip = wifi.wifi().ap_netif().get_ip_info()
+		.map_err(damn!("Failed to get IP information"))?.ip;
+
+	info!("Network up, with {format_string}, gateway IP {ip}");
+
+	Ok(wifi)
 }

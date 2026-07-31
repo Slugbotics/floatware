@@ -20,8 +20,6 @@ opt-level = "z"
 esp-idf-sys = { git = "https://github.com/esp-rs/esp-idf-sys.git" }
 esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal.git" }
 esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf-svc.git" }
-# TODO: remove when https://github.com/cat-in-136/ws2812-esp32-rmt-driver/issues/71 is resolved
-ws2812-esp32-rmt-driver = { git = "https://github.com/cat-in-136/ws2812-esp32-rmt-driver" }
 
 # Packages marked with (:: pkgname) are packages that we need, that are also dependencies of other packages we need
 # So we choose to use the version used by the other packages that we need to avoid duplication (unless there is an
@@ -41,7 +39,18 @@ rmp-serde = "1.3"
 ws2812-esp32-rmt-driver = { version = "0.14", features = ["smart-leds-trait"] }
 smart-leds-trait = "0.3"
 
-# Not used directly, but link error happens if we don't include it
+# IMU
+icm42670 = "0.2.0"
+
+# T & H
+shtcx = "1.0.0"
+
+cfor = "1.1.0"
+
+heapless = "0.9.3" # (::esp-idf-svc)
+
+time = { version = "0.3.55", features = ["default", "serde"] }
+
 embassy-time = { version = "0.5", features = ["generic-queue-8"] }
 
 [build-dependencies]

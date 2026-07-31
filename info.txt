@@ -1,0 +1,2 @@
+esp_idf_svc::hal::task::embassy_sync::EspRawMutex: Safe across threads but not ISRs
+embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex: Safe through ISRs

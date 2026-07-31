@@ -1,38 +1,50 @@
-use crate::signals::ShutdownSignal;
+use crate::{
+	prelude::*,
+	tasks::charter::{AbortReason, CharterState}
+};
 
 use std::{
 	error::Error,
-	fmt::{Debug, Display, Formatter},
-	sync::Arc
+	fmt::{Debug, Display, Formatter, Result as FmtResult},
 };
-
-use anyhow::Error as AnyhowError;
 
 ////////////////////////////////////////////////////////////////////////////////
 
 /// Potentially misleading name: this function doesn't stop a task; it is the task
 /// that causes the float to shut down when needed.
-/// TODO: maybe add a delay or signal to other tasks that they should gracefully exit
-/// TODO: maybe convert () to an enum representing how important it is we immediately shut down
 pub async fn shutdown_task(
-	shutdown_signal: Arc<ShutdownSignal>
-) -> Result<(), AnyhowError> {
+	shutdown_signal: &ShutdownSignal,
+	charter_state_sender: CharterStateSender<'_>,
+) -> Void {
 	// Suspend until something sends a signal on the shutdown channel
-	shutdown_signal.wait().await;
-	// And then exit, breaking out of the `try_join!`
-	Err(AnyhowError::new(Shutdown))
+	let shutdown_request = shutdown_signal.wait().await;
+
+	if shutdown_request.go_to_surface {
+		charter_state_sender.send(CharterState::Aborted { reason: AbortReason::Shutdown });
+		// TODO: some kind of sleep call, or wait for a response, to ensure it gets done
+	}
+
+	// Exit with an error, breaking out of the `try_join!` in float-thread
+	Err(AnyhowError::new(Shutdown(shutdown_request)))
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 
-pub struct Shutdown;
+/// Error type to indicate a normal shutdown
+pub struct Shutdown(pub ShutdownRequest);
+
+impl Error for Shutdown {}
 
 impl Debug for Shutdown {
-	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result { f.write_str("Shutdown") }
+	fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult { f.write_str("Shutdown") }
 }
 
 impl Display for Shutdown {
-	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result { f.write_str("Shutdown") }
+	fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult { f.write_str("Shutdown") }
 }
 
-impl Error for Shutdown {}
+#[derive(Debug)]
+pub struct ShutdownRequest {
+	pub originator: &'static str,
+	pub go_to_surface: bool,
+}

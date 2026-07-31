@@ -1,0 +1,15 @@
+ 0: Voltage measurement
+ 1: Current measurement
+ 2: Onboard ARGB LED
+ 3: Leak detection
+ 4: SD SPI CLK
+ 5: SD SPI MOSI
+ 6: SD SPI MISO
+ 7: SD SPI CS (has onboard LED)
+ 8: I2C SCL
+ 9: Onboard button
+10: I2C SDA
+18: Stepper DIR
+19: Stepper STEP
+20: Stepper UART RX
+21: Stepper UART TX

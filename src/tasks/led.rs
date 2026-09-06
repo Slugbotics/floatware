@@ -1,8 +1,12 @@
 use crate::{
 	prelude::*,
+	charter::CharterState,
 };
 
-use std::ops::Index;
+use std::{
+	ops::Index,
+	ptr,
+};
 
 use serde::Deserialize;
 
@@ -29,12 +33,14 @@ macro_rules! color_const {
 }
 
 color_const!(  NONE, 0x000000);
-color_const!(   DIM, 0x444444);
+color_const!(   DIM, 0x222222);
 color_const!(   RED, 0xFF0000);
 color_const!( GREEN, 0x00FF00);
 color_const!(  BLUE, 0x0000FF);
 color_const!(YELLOW, 0xFFFF00);
 color_const!(ORANGE, 0xFF7700);
+color_const!(  PINK, 0xFF36D9);
+color_const!(  AQUA, 0x00FFAA);
 
 const LED_MAXIMUM_SIMULTANEOUS_STATES: usize = 6;
 
@@ -45,16 +51,14 @@ pub struct LEDState {
 }
 
 impl LEDState {
-	pub fn new(list: &[RGB8]) -> Result<Self, AnyhowError> {
-		let size = list.len();
-		if size > LED_MAXIMUM_SIMULTANEOUS_STATES {
-			Err(AnyhowError::msg("LED state size is too large"))
-		} else {
-			Ok(Self {
-				size,
-				list: list.try_into()?,
-			})
-		}
+	pub fn new(slice: &[RGB8]) -> Result<Self, AnyhowError> {
+		let size = slice.len();
+		if size <= LED_MAXIMUM_SIMULTANEOUS_STATES {
+			let mut list = [NONE; LED_MAXIMUM_SIMULTANEOUS_STATES];
+			// This is safe because slice.len() <= list.len()
+			unsafe { ptr::copy_nonoverlapping(slice.as_ptr(), list.as_mut_ptr(), size); }
+			Ok(Self { size, list })
+		} else { Err(AnyhowError::msg("LED state size is too large")) }
 	}
 }
 
@@ -66,38 +70,11 @@ impl Index<usize> for LEDState {
 	}
 }
 
-// enum LEDStateOld {
-// 	CharterUpdate(CharterState),
-// 	StatusUpdate(SystemStatus)
-// }
-//
-// impl LEDStateOld {
-// 	fn get_led_color(&self) -> RGB8 {
-// 		match self {
-// 			Self::CharterUpdate(charter_state) => match charter_state {
-// 				CharterState::StartRequested => BLUE,
-// 				CharterState::InProgress {
-// 					charter_index, target_depth: _, charter_size
-// 				} => {
-// 					// Fade from blue to green as the charter is completed
-// 					let progress = (charter_index * 255 / charter_size) as u8; // 0 to 255
-// 					RGB8::new(0, progress, 255 - progress)
-// 				}
-// 				CharterState::Completed => GREEN,
-// 				CharterState::Aborted { .. } => RED,
-// 			},
-// 			Self::StatusUpdate(status) => {
-//
-// 			}
-// 		}
-// 	}
-// }
-
 ////////////////////////////////////////////////////////////////////////////////
 
 /// Lights the LED in accordance with the LED status set by the status generation
 /// task. We iterate through the colors, and cycle the LED through them.
-pub(crate) async fn led_task(
+pub(crate) async fn led_cycle_task(
 	mut led_driver: LedPixelEsp32Rmt<'_, RGB8, LedPixelColorGrbw32>,
 	led_state_signal: &LedStateSignal,
 ) -> Never {
@@ -137,5 +114,51 @@ pub(crate) async fn led_task(
 		}
 
 		set_led(current_led_state[led_index]);
+	}
+}
+
+pub(crate) async fn led_selection_task(
+	led_state_signal: &LedStateSignal,
+	mut status_receiver: StatusReceiver<'_>,
+	button_led_signal: &LedColorSignal,
+	uart_release_receiver: UartReleaseReceiver<'_>
+) -> Never {
+	loop {
+		let status = status_receiver.get().await;
+
+		let charter_state = status.charter_state;
+
+		// The LED can be set to blink in a sequence of colors, so different systems can
+		// convey their statuses simultaneously.
+		// Currently, though, the only thing that does is the charter.
+		let charter_led = match &charter_state {
+			None => AQUA,
+			Some(state) => match state {
+				CharterState::StartRequested => BLUE,
+				CharterState::InProgress {
+					charter_index, target_depth: _, charter_size
+				} => { // Fade from blue to green as the charter is completed
+					let progress = (charter_index * 255 / charter_size) as u8; // 0 to 255
+					RGB8::new(0, progress, 255 - progress)
+				},
+				CharterState::Completed => GREEN,
+				CharterState::Aborted { .. } => ORANGE,
+			}
+		};
+
+		let button_led = button_led_signal.try_take();
+
+		let mut led_vec = Vec::with_capacity(LED_MAXIMUM_SIMULTANEOUS_STATES);
+		led_vec.push(charter_led);
+
+		if let Some(button_led) = button_led {
+			led_vec.push(button_led);
+		}
+		
+		if uart_release_receiver.contains_value() {
+			led_vec.push(PINK);
+		}
+
+		led_state_signal.signal(LEDState::new(led_vec.as_slice())?);
 	}
 }

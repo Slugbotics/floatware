@@ -1,37 +1,41 @@
 use crate::{
 	prelude::*,
 	tasks::{
-		*,
+		button::boot_button_pressed_task,
 		charter::{
-			depth_target_update_task,
-			depth_control_task
+			depth_control_task,
+			depth_target_update_task
 		},
 		i2c::initialize_i2c_thread,
 		leak_detection::leak_detection_task,
+		led::{led_cycle_task, led_selection_task},
 		power_measurement::power_measurement_task,
-		shutdown::Shutdown,
+		sd_card::{
+			mount_sd_card,
+			read_config_from_sd,
+			sd_logging_task,
+			setup_sd_card
+		},
+		shutdown::{
+			shutdown_task,
+			Shutdown,
+		},
 		status::status_publishing_task,
 		stepper_controller::stepper_control_task,
-		sd_card::{
-			read_config_from_sd,
-			setup_sd_card,
-			mount_sd_card,
-			sd_logging_task
-		},
-		button::boot_button_pressed_task,
+		*,
 	},
 };
 
 use esp_idf_svc::{
 	eventloop::EspSystemEventLoop,
 	hal::{
-		peripherals::Peripherals,
-		gpio::{Gpio9, PinDriver, Pull}
+		gpio::{Gpio9, PinDriver, Pull},
+		peripherals::Peripherals
 	},
 	http::server::EspHttpServer,
 	nvs::EspDefaultNvsPartition,
-	timer::EspTaskTimerService,
 	sys::{uxTaskGetStackHighWaterMark2, xTaskGetCurrentTaskHandle},
+	timer::EspTaskTimerService,
 };
 
 use ws2812_esp32_rmt_driver::{driver::color::LedPixelColorGrbw32, LedPixelEsp32Rmt, RGB8};
@@ -74,6 +78,8 @@ static I2C_CHANNEL: I2cUnsplitChannel = I2cUnsplitChannel::new();
 
 static CHARTER_STATE_CHANNEL: CharterStateUnsplitWatch = CharterStateUnsplitWatch::new(/* no Charter */);
 
+static RELEASE_UART_CHANNEL: UartReleaseUnsplitWatch = UartReleaseUnsplitWatch::new();
+
 /// Where we actually start setting up everything. This function is responsible for
 /// spawning the remaining threads, initializing peripherals, and spawning tasks.
 pub async fn float_thread() -> Void {
@@ -94,6 +100,7 @@ pub async fn float_thread() -> Void {
 	let status_channel = StatusUnsplitWatch::new();
 	let led_state_channel = LedStateSignal::new();
 	let stepper_state_channel = StepperStateSignal::new();
+	let button_led_signal = LedColorSignal::new();
 
 	////////////////////////////////////////
 	// Initialize external free-running systems
@@ -149,6 +156,7 @@ pub async fn float_thread() -> Void {
 		&SHUTDOWN_CHANNEL,
 		I2C_CHANNEL.sender(),
 		CHARTER_STATE_CHANNEL.sender(),
+		RELEASE_UART_CHANNEL.sender(),
 	).map_err(damn!("Failed to initialize HTTP server"))?;
 
 	let led_driver =
@@ -163,14 +171,7 @@ pub async fn float_thread() -> Void {
 
 	// Any task returning an error leads to an immediate shutdown
 	let Err(error) = futures::try_join!(
-		led::led_task(
-			led_driver,
-			&led_state_channel, // reader
-		),
-		shutdown::shutdown_task(
-			&SHUTDOWN_CHANNEL, // reader
-			CHARTER_STATE_CHANNEL.sender()
-		),
+		// ========== Peripheral Management ==========
 		depth_target_update_task(
 			wrecv!(CHARTER_STATE_CHANNEL),
 			CHARTER_STATE_CHANNEL.sender(),
@@ -180,6 +181,15 @@ pub async fn float_thread() -> Void {
 			wrecv!(CHARTER_STATE_CHANNEL),
 			wrecv!(status_channel),
 			&stepper_state_channel, // writer
+		),
+		stepper_control_task(
+			peripherals.uart0,
+			peripherals.pins.gpio20, // RX
+			peripherals.pins.gpio21, // TX
+			peripherals.pins.gpio18, // dir
+			peripherals.pins.gpio19, // step
+			&stepper_state_channel, // reader
+			wrecv!(RELEASE_UART_CHANNEL),
 		),
 		leak_detection_task(
 			peripherals.pins.gpio3,
@@ -191,28 +201,37 @@ pub async fn float_thread() -> Void {
 			peripherals.pins.gpio1, // current ADC
 			power_measurement_request_channel.receiver(),
 		),
-		stepper_control_task(
-			peripherals.uart0,
-			peripherals.pins.gpio20, // RX
-			peripherals.pins.gpio21, // TX
-			peripherals.pins.gpio18, // dir
-			peripherals.pins.gpio19, // step
-			&stepper_state_channel, // reader
+		// ========== I/O ==========
+		boot_button_pressed_task(
+			peripherals.pins.gpio9,
+			&button_led_signal, // writer
+			RELEASE_UART_CHANNEL.sender(), // writer
 		),
+		led_selection_task(
+			&led_state_channel, // writer
+			wrecv!(status_channel),
+			&button_led_signal, // reader
+			wrecv!(RELEASE_UART_CHANNEL),
+		),
+		led_cycle_task(
+			led_driver,
+			&led_state_channel, // reader
+		),
+		sd_logging_task(
+			wrecv!(status_channel),
+			&sd_fs_handle,
+		),
+		// ========== Internal Housekeeping ==========
 		status_publishing_task(
 			power_measurement_request_channel.sender(),
 			status_channel.sender(),
 			I2C_CHANNEL.sender(),
 			wrecv!(CHARTER_STATE_CHANNEL),
-			&led_state_channel, // writer
 		),
-		boot_button_pressed_task(
-			peripherals.pins.gpio9
+		shutdown_task(
+			&SHUTDOWN_CHANNEL, // reader
+			CHARTER_STATE_CHANNEL.sender()
 		),
-		sd_logging_task(
-			wrecv!(status_channel),
-			&sd_fs_handle,
-		)
 	);
 
 	// The shutdown task has a unique error that it returns to indicate a normal shutdown
@@ -240,7 +259,7 @@ fn boot_button_pressed(input: &mut Gpio9) -> bool {
 		unsafe { input.reborrow() },
 		Pull::Up
 	) {
-		Ok(driver) => driver.is_low(),
+		Ok(driver) => driver.is_low(), // Button is active-low
 		Err(error) => {
 			warn!("Unable to create input driver to check boot button: {error:#?}");
 			false

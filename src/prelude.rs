@@ -10,6 +10,7 @@ use esp_idf_svc::timer::EspAsyncTimer;
 pub(crate) use {
 	crate::{
 		signals::*,
+		tasks::*,
 		damn, sleep, sleep_ms, ret_err, SD_CARD_NAME, sd
 	},
 	anyhow::Error as AnyhowError,

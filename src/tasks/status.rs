@@ -1,21 +1,19 @@
-use crate::{prelude::*, get_time, tasks::{
+use crate::{get_time, prelude::*, tasks::{
 	charter::{
-		Depth,
-		CharterState
+		CharterState,
+		Depth
 	},
-	power_measurement::PowerMeasurement,
 	i2c::I2cCommand,
-	led::LEDState
-}, TimeContainer, tasks};
+	power_measurement::PowerMeasurement,
+}, TimeContainer};
 
 use std::fmt::{Debug, Display};
-use std::slice;
+
 use futures::{
 	channel::oneshot::channel,
 	join
 };
-use smart_leds_trait::RGB8;
-use tasks::led;
+
 ////////////////////////////////////////////////////////////////
 
 const SNAPSHOT_INTERVAL_MS: u64 = 100;
@@ -59,9 +57,8 @@ pub async fn status_publishing_task(
 	status_sender: StatusSender<'_>,
 	i2c_sender: I2cSender<'_>,
 	mut charter_state_receiver: CharterStateReceiver<'_>,
-	led_signal: &LedStateSignal,
 ) -> Never {
-	let mut counter = 0u8;
+	let mut counter = 0;
 	loop {
 		counter += 1;
 		let create_log_entry = counter == 10;
@@ -70,8 +67,8 @@ pub async fn status_publishing_task(
 		}
 
 		// To make things more efficient, we can concurrently await all four asynchronous
-		// transactions that need to take place (respectively sending and receiving the request and
-		// response for each of the power and depth measurements
+		// transactions that need to take place (respectively sending and receiving the
+		// request and response for each of the power and depth measurements
 		let (power_measurement, depth) = {
 			let (power_tx, power_rx) = channel();
 			let (depth_tx, depth_rx) = channel();
@@ -96,32 +93,6 @@ pub async fn status_publishing_task(
 		};
 
 		let charter_state = charter_state_receiver.try_get();
-
-		// The LED can be set to blink in a sequence of colors, so different systems can
-		// convey their statuses simultaneously.
-		// Currently, though, the only thing that does is the charter.
-		let charter_led = match &charter_state {
-			None => led::NONE,
-			Some(state) => match state {
-				CharterState::StartRequested => led::BLUE,
-				CharterState::InProgress {
-					charter_index, target_depth: _, charter_size
-				} => { // Fade from blue to green as the charter is completed
-					let progress = (charter_index * 255 / charter_size) as u8; // 0 to 255
-					RGB8::new(0, progress, 255 - progress)
-				},
-				CharterState::Completed => led::GREEN,
-				CharterState::Aborted { .. } => led::ORANGE,
-			}
-		};
-
-		let led_state = if charter_led == led::NONE {
-			LEDState::new(&[led::NONE, led::DIM])? // Heartbeat of sorts if no charter
-		} else {
-			LEDState::new(slice::from_ref(&charter_led))?
-		};
-
-		led_signal.signal(led_state);
 
 		status_sender.send(SystemStatus {
 			depth,

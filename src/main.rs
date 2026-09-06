@@ -1,5 +1,8 @@
-#![feature(io_error_too_many_open_files)]
-#![feature(io_error_input_output_error)]
+#![feature(
+	io_error_too_many_open_files,
+	io_error_input_output_error,
+	const_trait_impl,
+)]
 
 mod floatware;
 mod tasks;

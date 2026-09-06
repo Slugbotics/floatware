@@ -50,17 +50,19 @@ use embedded_svc::{
 pub fn initialize_http_server<'server>(
 	shutdown_signal_sender: &'static ShutdownSignal,
 	i2c_sender: I2cSender<'static>,
-	charter_state_sender: CharterStateSender<'static>
+	charter_state_sender: CharterStateSender<'static>,
+	uart_release_sender: UartReleaseSender<'static>,
 ) -> Result<EspHttpServer<'server>, EspIOError> {
 	let mut server = EspHttpServer::new(&Default::default())?;
 
 	server
-		.handler("/heartbeat",  Method::Get,  GetHeartbeat)?
-		.handler("/status",     Method::Get,  pep(GetStatus { i2c_sender }))?
-		.handler("/config",     Method::Post, pep(PostConfig {}))?
-		.handler("/shutdown",   Method::Post, pep(PostShutdown { shutdown_signal_sender }))?
-		.handler("/start_dive", Method::Post, pep(PostStartDive { charter_state_sender }))?
-		.handler("/time_sync",  Method::Post, pep(PostTimeSync))?
+		.handler("/heartbeat",    Method::Get,  GetHeartbeat)?
+		.handler("/status",       Method::Get,  pep(GetStatus { i2c_sender }))?
+		.handler("/config",       Method::Post, pep(PostConfig {}))?
+		.handler("/shutdown",     Method::Post, pep(PostShutdown { shutdown_signal_sender }))?
+		.handler("/start_dive",   Method::Post, pep(PostStartDive { charter_state_sender }))?
+		.handler("/time_sync",    Method::Post, pep(PostTimeSync))?
+		.handler("/release_uart", Method::Post, pep(PostReleaseUart { uart_release_sender }))?
 	;
 
 	Ok(server)
@@ -146,6 +148,17 @@ impl<'request> Handler<EspHttpConnection<'request>> for PostShutdown {
 
 	fn handle(&self, conn: &mut EspHttpConnection) -> Result<(), AnyhowError> {
 		self.shutdown_signal_sender.signal(ShutdownRequest { originator: "http request", go_to_surface: true });
+
+		reply_204(conn)
+	}
+}
+
+struct PostReleaseUart { uart_release_sender: UartReleaseSender<'static> }
+impl<'request> Handler<EspHttpConnection<'request>> for PostReleaseUart {
+	type Error = AnyhowError;
+
+	fn handle(&self, conn: &mut EspHttpConnection) -> Result<(), AnyhowError> {
+		self.uart_release_sender.send(());
 
 		reply_204(conn)
 	}

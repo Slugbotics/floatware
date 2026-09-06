@@ -16,11 +16,13 @@ use esp_idf_svc::{
 	}
 };
 
+use futures::future::{select, Either};
+
 ////////////////////////////////////////////////////////////////////////////////
 
 pub type StepperState = (/* TODO */);
 
-/// TODO: Tharuka
+/// TODO
 pub async fn stepper_control_task(
 	uart_controller: impl Uart,
 	rx_pin: impl InputPin,
@@ -28,7 +30,14 @@ pub async fn stepper_control_task(
 	dir_pin: impl OutputPin,
 	step_pin: impl OutputPin,
 	stepper_state_channel: &StepperStateSignal,
-) -> Never {
+	mut release_uart_signal: UartReleaseReceiver<'_>,
+) -> Void {
+	// When the UART controller assumes control of the UART pins, it
+	// clobbers USB serial communication, including flashing & console.
+	// So, in order to make reflashing easier, we need to have a way to drop
+	// the UART controller and let it release its associated pins. So when
+	// we receive a release UART signal, we must return.
+
 	let uart_driver = AsyncUartDriver::new(
 		uart_controller, tx_pin, rx_pin,
 		None::<AnyIOPin>, None::<AnyIOPin>, // CTS & RTS pins, which we don't use
@@ -42,7 +51,11 @@ pub async fn stepper_control_task(
 		.map_err(damn!("Failed to initialize stepper STEP pin"))?;
 
 	loop {
-		let state = stepper_state_channel.wait().await;
-		// TODO
+		// Concurrently await stepper commands or a UART release signal
+		let future = select(stepper_state_channel.wait(), release_uart_signal.get()).await;
+
+		// Pull out stepper state if we get it, otherwise we got the UART release signal so we need
+		let stepper_state = if let Either::Left((s, _)) = future { s } else { return Ok(()) };
+
 	}
 }

@@ -10,7 +10,7 @@ use esp_idf_svc::hal::gpio::{Gpio9, PinDriver, Pull};
 
 use embassy_time::{Duration, WithTimeout};
 use smart_leds_trait::RGB8;
-
+use crate::tasks::stepper_controller::UartRelease;
 ////////////////////////////////////////////////////////////////////////////////
 
 #[derive(Copy, Clone)]
@@ -65,6 +65,7 @@ pub async fn boot_button_pressed_task(
 		for (index, Con(duration, led)) in DURATIONS.iter().enumerate() {
 			// Set LED to indicate what will happen if you release the button
 			led_color_signal.signal(*led);
+			info!("Next action in {} ms", duration.as_millis());
 
 			if let Ok(result) =
 				driver.wait_for_rising_edge()
@@ -74,13 +75,18 @@ pub async fn boot_button_pressed_task(
 				// Button released
 				result.map_err(damn!("Unpress await failed"))?;
 				match index {
-					0 => {/* [0, 200) -> nothing; guard */},
+					0 => {
+						// [0, 200) -> nothing; guard
+						info!("Unpress 0");
+					},
 					1 => {
 						// [200, 3000) -> TBD
+						info!("Unpress 1");
 					},
 					2 => {
 						// [3000, 6000) -> release UART
-						release_uart_signal.send(());
+						info!("Unpress 2");
+						release_uart_signal.send(UartRelease::Requested);
 					},
 					_ => unreachable!(),
 				}
@@ -88,8 +94,8 @@ pub async fn boot_button_pressed_task(
 			} // else: timed out, go to next
 		}
 		// Went past last item (or broke after action); overflow/reset to doing nothing
-
 		led_color_signal.reset();
+		info!("Button overflow");
 		// Note that signal reset != none. When it is none, the LED
 		// will (probably) flash, as opposed to not changing at all
 	}

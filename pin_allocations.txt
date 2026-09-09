@@ -9,7 +9,7 @@
  8: I2C SCL
  9: Onboard button
 10: I2C SDA
-18: Stepper DIR
-19: Stepper STEP
-20: Stepper UART RX
-21: Stepper UART TX
+18: Stepper UART RX + TX
+19:
+20: Stepper DIR
+21: Stepper STEP

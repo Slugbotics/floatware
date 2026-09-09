@@ -8,22 +8,20 @@ use crate::{
 
 use std::{
 	fs::{File, OpenOptions},
-	io::Write,
-	io::ErrorKind
+	io::ErrorKind,
+	io::Write
 };
 
 use esp_idf_svc::{
-	fs::{
-		fatfs::{
-			Fatfs,
-			config::{FatFsType, FormatConfiguration}
-		}
+	fs::fatfs::{
+		config::{FatFsType, FormatConfiguration},
+		Fatfs
 	},
 	hal::{
 		gpio::{
 			AnyIOPin,
-			OutputPin,
 			InputPin,
+			OutputPin,
 		},
 		sd::{
 			config::Configuration as SdConfiguration,
@@ -43,7 +41,7 @@ use esp_idf_svc::{
 use heapless::String as HeaplessString;
 
 use serde::Deserialize;
-
+use crate::config::SystemConfig;
 ////////////////////////////////////////////////////////////////////////////////
 
 macro_rules! open_file {
@@ -127,23 +125,6 @@ pub fn mount_sd_card<'a>(
 
 ////////////////////////////////////////////////////////////////////////////////
 
-#[derive(Deserialize, Debug)]
-pub struct SystemConfig {
-	pub wifi_ssid: HeaplessString<32>,
-	pub wifi_pass: HeaplessString<64>,
-	pub charter: Charter
-}
-
-impl Default for SystemConfig {
-	fn default() -> Self {
-		SystemConfig {
-			wifi_ssid: "ESP".try_into().unwrap(), // Will never fail; less than character limit
-			wifi_pass: "floatware".try_into().unwrap(), // ditto
-			charter: Default::default()
-		}
-	}
-}
-
 pub fn read_config_from_sd() -> Result<SystemConfig, AnyhowError> {
 	SystemConfig::deserialize(
 		&mut serde_json::Deserializer::from_reader(
@@ -160,7 +141,7 @@ pub fn read_config_from_sd() -> Result<SystemConfig, AnyhowError> {
 /// **Blocks entire FreeRTOS thread on write!** If the write operations are
 /// expensive, it may be worthwhile to consider creating an I/O thread like I2C.
 pub async fn sd_logging_task(
-	mut status_receiver: StatusReceiver<'_>,
+	mut status_receiver: SystemStatusReceiver<'_>,
 	fs_handle: &Option<FSHandle<'_>>,
 ) -> Void {
 	// We don't actually need the fs handle in order to write to the filesystem,

@@ -44,13 +44,15 @@ color_const!(  AQUA, 0x00FFAA);
 
 const LED_MAXIMUM_SIMULTANEOUS_STATES: usize = 6;
 
+const LED_DIMMING_FACTOR: u8 = 5;
+
 #[derive(Debug, Clone, PartialEq)]
-pub struct LEDState {
+pub struct LedState {
 	pub size: usize,
 	pub list: [RGB8; LED_MAXIMUM_SIMULTANEOUS_STATES],
 }
 
-impl LEDState {
+impl LedState {
 	pub fn new(slice: &[RGB8]) -> Result<Self, AnyhowError> {
 		let size = slice.len();
 		if size <= LED_MAXIMUM_SIMULTANEOUS_STATES {
@@ -62,7 +64,7 @@ impl LEDState {
 	}
 }
 
-impl Index<usize> for LEDState {
+impl Index<usize> for LedState {
 	type Output = RGB8;
 
 	fn index(&self, index: usize) -> &Self::Output {
@@ -79,23 +81,27 @@ pub(crate) async fn led_cycle_task(
 	led_state_signal: &LedStateSignal,
 ) -> Never {
 	let mut current_led_value = NONE;
-	let mut current_led_state = LEDState::new(&[])?;
+	let mut current_led_state = LedState::new(&[])?;
 	let mut led_index = 0_usize;
 
-	let mut set_led = |led| {
+	let mut set_led = |mut led| {
 		if current_led_value != led {
 			current_led_value = led;
+			led.r >>= LED_DIMMING_FACTOR;
+			led.g >>= LED_DIMMING_FACTOR;
+			led.b >>= LED_DIMMING_FACTOR;
 			led_driver.write(std::iter::once(led))
 				.unwrap_or_else(|error| error!("Error writing LED: {error:#}"));
 		}
 	};
 
 	loop {
-		// Status updates come every ~100ms.
+		// Status updates come every ~500ms.
 		let new_led_state = led_state_signal.wait().await;
 
 		// If we get a new state, then reset cycle.
 		if new_led_state != current_led_state {
+			info!("Got new {new_led_state:?}");
 			current_led_state = new_led_state;
 			led_index = 0;
 		}
@@ -107,30 +113,26 @@ pub(crate) async fn led_cycle_task(
 			continue;
 		}
 
-		if led_index >= current_led_state.size {
-			led_index = 0;
-		} else {
-			led_index += 1;
-		}
-
 		set_led(current_led_state[led_index]);
+
+		led_index += 1;
+		if led_index >= current_led_state.size { led_index = 0; }
 	}
 }
 
 pub(crate) async fn led_selection_task(
 	led_state_signal: &LedStateSignal,
-	mut status_receiver: StatusReceiver<'_>,
+	mut status_receiver: SystemStatusReceiver<'_>,
 	button_led_signal: &LedColorSignal,
 	uart_release_receiver: UartReleaseReceiver<'_>
 ) -> Never {
 	loop {
-		let status = status_receiver.get().await;
+		let status = status_receiver.changed().await;
 
 		let charter_state = status.charter_state;
 
 		// The LED can be set to blink in a sequence of colors, so different systems can
 		// convey their statuses simultaneously.
-		// Currently, though, the only thing that does is the charter.
 		let charter_led = match &charter_state {
 			None => AQUA,
 			Some(state) => match state {
@@ -149,16 +151,17 @@ pub(crate) async fn led_selection_task(
 		let button_led = button_led_signal.try_take();
 
 		let mut led_vec = Vec::with_capacity(LED_MAXIMUM_SIMULTANEOUS_STATES);
-		led_vec.push(charter_led);
 
 		if let Some(button_led) = button_led {
 			led_vec.push(button_led);
 		}
-		
+
 		if uart_release_receiver.contains_value() {
 			led_vec.push(PINK);
 		}
 
-		led_state_signal.signal(LEDState::new(led_vec.as_slice())?);
+		led_vec.push(charter_led);
+
+		led_state_signal.signal(LedState::new(led_vec.as_slice())?);
 	}
 }

@@ -7,7 +7,12 @@ use crate::{get_time, prelude::*, tasks::{
 	power_measurement::PowerMeasurement,
 }, TimeContainer};
 
-use std::fmt::{Debug, Display};
+use std::fmt::{
+	Debug,
+	Display,
+	Error as FmtError,
+	Formatter,
+};
 
 use futures::{
 	channel::oneshot::channel,
@@ -16,7 +21,7 @@ use futures::{
 
 ////////////////////////////////////////////////////////////////
 
-const SNAPSHOT_INTERVAL_MS: u64 = 100;
+const SNAPSHOT_INTERVAL_MS: u64 = 500;
 
 #[derive(Debug, Clone)]
 pub struct SystemStatus {
@@ -33,7 +38,7 @@ impl SystemStatus {
 }
 
 impl Display for SystemStatus {
-	fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+	fn fmt(&self, fmt: &mut Formatter<'_>) -> Result<(), FmtError> {
 		fmt.write_fmt(format_args!(
 			"[{}] depth: {}; voltage: {}; current: {}; charter state: ",
 			self.timestamp, self.depth, self.power_measurement.voltage,
@@ -54,7 +59,7 @@ impl Display for SystemStatus {
 /// query the hardware themselves.
 pub async fn status_publishing_task(
 	power_measurement_request_sender: PowerMeasurementRequestSender<'_>,
-	status_sender: StatusSender<'_>,
+	status_sender: SystemStatusSender<'_>,
 	i2c_sender: I2cSender<'_>,
 	mut charter_state_receiver: CharterStateReceiver<'_>,
 ) -> Never {

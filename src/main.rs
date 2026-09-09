@@ -2,12 +2,15 @@
 	io_error_too_many_open_files,
 	io_error_input_output_error,
 	const_trait_impl,
+	map_try_insert,
 )]
 
 mod floatware;
 mod tasks;
 mod signals;
 mod prelude;
+mod debugging;
+mod config;
 
 use crate::prelude::*;
 

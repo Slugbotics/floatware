@@ -44,7 +44,7 @@ use embedded_svc::{
 		Read
 	}
 };
-
+use crate::tasks::stepper_controller::UartRelease;
 ////////////////////////////////////////////////////////////////////////////////
 
 pub fn initialize_http_server<'server>(
@@ -158,7 +158,7 @@ impl<'request> Handler<EspHttpConnection<'request>> for PostReleaseUart {
 	type Error = AnyhowError;
 
 	fn handle(&self, conn: &mut EspHttpConnection) -> Result<(), AnyhowError> {
-		self.uart_release_sender.send(());
+		self.uart_release_sender.send(UartRelease::Requested);
 
 		reply_204(conn)
 	}

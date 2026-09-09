@@ -11,7 +11,7 @@ use std::{
 };
 
 use embassy_time::WithTimeout;
-
+use crate::tasks::stepper_controller::StepperState;
 ////////////////////////////////////////////////////////////////////////////////
 
 /// TODO based on I2C depth sensor driver code
@@ -113,13 +113,14 @@ pub async fn depth_target_update_task(
 			charter_index, (target_start_time, target_depth)
 		) in charter.iter().enumerate() {
 			// Determine how much time we need to wait until `start_time` has passed since `start`
-			let time_since_start = Instant::now() - start;
+			let time_since_start = start.elapsed();
 
 			// We need to wait another (start_time - time_since_start)
 			if sleep_and_check_aborted(
 				&mut charter_state_receiver,
 				target_start_time.saturating_sub(time_since_start)
 			).await.is_some() {
+				info!("Depth target task: aborting charter");
 				// We are aborting, stop setting new charter states
 				continue 'enclosing;
 				// Depth control has also received this signal so there's no need to do anything
@@ -137,21 +138,6 @@ pub async fn depth_target_update_task(
 			// into the sender from a different thread. However, it is not currently possible for
 			// that to happen, given the current architecture of the firmware.
 
-			// if {
-			// 	let aborted = RefCell::new(false);
-			// 	charter_state_sender.send_modify(|charter_state| {
-			// 		if let Some(CharterState::Aborted { reason }) = charter_state {
-			// 			error!("Charter aborted: {reason}");
-			// 			aborted.replace(true);
-			// 		} else {
-			// 			*charter_state = Some(CharterState::InProgress {
-			// 				charter_index, target_depth: *target_depth, charter_size
-			// 			});
-			// 		}
-			// 	});
-			// 	aborted.take()
-			// } { continue 'enclosing; }
-
 			charter_state_sender.send(CharterState::InProgress {
 				charter_index, target_depth: *target_depth, charter_size
 			});
@@ -167,7 +153,7 @@ pub async fn depth_target_update_task(
 /// the current depth closer to the target.
 pub async fn depth_control_task(
 	mut charter_state_receiver: CharterStateReceiver<'_>,
-	mut status_receiver: StatusReceiver<'_>,
+	mut status_receiver: SystemStatusReceiver<'_>,
 	// i2c_sender: I2cSender<'_>,
 	stepper_state_channel: &StepperStateSignal
 ) -> Void {
@@ -194,13 +180,21 @@ pub async fn depth_control_task(
 			charter_state_receiver.changed_and(charter_state_predicate).await
 		};
 
-		info!("Got state: {:?}", state);
+		info!("Depth control: got state: {:?}", state);
 
 		match state {
 			CharterState::InProgress { target_depth, .. } => {
 				dive_in_progress = true;
 
 				let current_depth = status_receiver.get().await.depth;
+
+				stepper_state_channel.signal(
+					if current_depth > target_depth {
+						StepperState::WeAreTooLow
+					} else {
+						StepperState::WeAreTooHigh
+					}
+				);
 
 				// TODO: adjust stepper to get closer to target, then sleep or something
 			}
@@ -245,17 +239,3 @@ pub async fn depth_control_task(
 		Some(reason)
 	} else { None }
 }
-
-// #[inline] async fn sleep_and_check_aborted(
-// 	charter_state_receiver: &mut CharterStateReceiver<'_>,
-// 	duration: Duration,
-// ) -> Option<AbortReason> {
-// 	charter_state_receiver.changed_and(
-// 		|state| matches!(state, CharterState::Aborted { .. })
-// 	).with_timeout(
-// 		duration.try_into().unwrap() // Will fail if duration > 584542 years
-// 	).await.ok().map(|state| if let CharterState::Aborted { reason } = state {
-// 		error!("Charter aborted: {reason}");
-// 		reason
-// 	} else { unreachable!() })
-// }

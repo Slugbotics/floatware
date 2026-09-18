@@ -4,7 +4,6 @@ use crate::{
 		i2c::I2cCommand,
 		charter::CharterState,
 		led::LedState,
-		power_measurement::PowerMeasurement,
 		stepper_controller::{
 			StepperState,
 			UartRelease
@@ -105,11 +104,6 @@ build_watch!(
 build_watch!(
 /// Written from HTTP thread
 	SystemStatus, MultiTaskMutex, 3
-);
-
-build_channel!(
-/// Not used outside float thread
-	PowerMeasurementRequest, Sender<PowerMeasurement>, SingleTaskMutex, 8
 );
 
 build_channel!(

@@ -10,6 +10,7 @@ use esp_idf_svc::hal::gpio::{Gpio9, PinDriver, Pull};
 
 use embassy_time::{Duration, WithTimeout};
 use smart_leds_trait::RGB8;
+use crate::debugging::{get_tasks, iter_tasks};
 use crate::tasks::stepper_controller::UartRelease;
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -43,7 +44,7 @@ const DURATIONS: [Con; 3] = Con::from_list([
 	// None, guard against accidental presses
 	( 200, led::NONE),
 	// TBD
-	(3000, led::NONE),
+	(3000, led::YELLOW),
 	// Drop UART
 	(6000, led::PINK),
 	// None; if you hold the button for too long, you can keep holding it until it resets to noop.
@@ -82,6 +83,8 @@ pub async fn boot_button_pressed_task(
 					1 => {
 						// [200, 3000) -> TBD
 						info!("Unpress 1");
+
+						info!("{:#?}", get_tasks());
 					},
 					2 => {
 						// [3000, 6000) -> release UART

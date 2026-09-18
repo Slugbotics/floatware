@@ -16,11 +16,16 @@
 
 use crate::{
 	prelude::*,
-	set_boot_time, 
+	set_boot_time,
 	tasks::{
 		i2c::I2cCommand,
 		charter::CharterState,
-		shutdown::ShutdownRequest
+		shutdown::ShutdownRequest,
+		stepper_controller::UartRelease
+	},
+	debugging::{
+		get_profiling_data,
+		get_tasks,
 	}
 };
 
@@ -44,7 +49,8 @@ use embedded_svc::{
 		Read
 	}
 };
-use crate::tasks::stepper_controller::UartRelease;
+use serde_json::from_str;
+use time::Timestamp;
 ////////////////////////////////////////////////////////////////////////////////
 
 pub fn initialize_http_server<'server>(
@@ -56,8 +62,10 @@ pub fn initialize_http_server<'server>(
 	let mut server = EspHttpServer::new(&Default::default())?;
 
 	server
-		.handler("/heartbeat",    Method::Get,  GetHeartbeat)?
-		.handler("/status",       Method::Get,  pep(GetStatus { i2c_sender }))?
+		.handler("/heartbeat",    Method:: Get, GetHeartbeat)?
+		.handler("/status",       Method:: Get, pep(GetStatus { i2c_sender }))?
+		.handler("/profiling",    Method:: Get, pep(GetProfiling))?
+		.handler("/thread_info",  Method:: Get, pep(GetThreadInfo))?
 		.handler("/config",       Method::Post, pep(PostConfig {}))?
 		.handler("/shutdown",     Method::Post, pep(PostShutdown { shutdown_signal_sender }))?
 		.handler("/start_dive",   Method::Post, pep(PostStartDive { charter_state_sender }))?
@@ -65,12 +73,12 @@ pub fn initialize_http_server<'server>(
 		.handler("/release_uart", Method::Post, pep(PostReleaseUart { uart_release_sender }))?
 	;
 
+	info!("Server object successfully created");
+
 	Ok(server)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-
-// TODO: Maybe make a macro that generates these structs?
 
 /// Noop req. We don't use PlainErrorPage to make handling the connection faster.
 struct GetHeartbeat;
@@ -103,6 +111,41 @@ impl<'request> Handler<EspHttpConnection<'request>> for GetStatus {
 		info!("Received {th:?}");
 
 		reply(conn, 200, format!("Temp: {} C, Humidity: {}%\n", th.celsius, th.relative_humidity))
+	}
+}
+
+struct GetProfiling;
+impl<'request> Handler<EspHttpConnection<'request>> for GetProfiling {
+	type Error = AnyhowError;
+
+	fn handle(&self, conn: &mut EspHttpConnection) -> Result<(), AnyhowError> {
+		let profiling = match get_profiling_data() {
+			Some(data) => data,
+			None => return reply(conn, 400, "Profiling not enabled".into()),
+		};
+
+		info!("{profiling:#?}");
+
+		match serde_json::to_string_pretty(profiling) {
+			Ok(json) => reply(conn, 200, json),
+			Err(error) => reply(conn, 500, error.to_string()),
+		}
+	}
+}
+
+struct GetThreadInfo;
+impl<'request> Handler<EspHttpConnection<'request>> for GetThreadInfo {
+	type Error = AnyhowError;
+
+	fn handle(&self, conn: &mut EspHttpConnection) -> Result<(), AnyhowError> {
+		let thread_info= get_tasks();
+
+		info!("{thread_info:?}");
+
+		match serde_json::to_string_pretty(&thread_info) {
+			Ok(json) => reply(conn, 200, json),
+			Err(error) => reply(conn, 500, error.to_string()),
+		}
 	}
 }
 

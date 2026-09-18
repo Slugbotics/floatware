@@ -1,17 +1,34 @@
-use crate::prelude::*;
-
-use std::{
-	future::{poll_fn, Future},
-	pin::pin,
-	time::{Duration, Instant},
-	ffi::CStr,
-	ptr::null_mut,
-	collections::HashMap,
-	sync::{RwLock}
+use crate::{
+	floatware::get_float_thread_handle,
+	prelude::*,
+	tasks::i2c::get_i2c_thread_handle
 };
 
-// I don't know why my IDE doesn't break this into multiple lines
-use esp_idf_svc::sys::{eTaskState, eTaskState_eBlocked, eTaskState_eDeleted, eTaskState_eInvalid, eTaskState_eReady, eTaskState_eRunning, eTaskState_eSuspended, uxTaskGetNumberOfTasks, uxTaskGetStackHighWaterMark, uxTaskGetSystemState, xTASK_STATUS, xTaskGetCurrentTaskHandle, TaskHandle_t};
+use std::{
+	collections::HashMap,
+	ffi::CStr,
+	future::{poll_fn, Future},
+	num::Saturating,
+	pin::pin,
+	ptr::null_mut,
+	sync::RwLock,
+	time::{Duration, Instant}
+};
+
+use esp_idf_svc::sys::{
+	eTaskState,
+	eTaskState_eBlocked,
+	eTaskState_eDeleted,
+	eTaskState_eInvalid,
+	eTaskState_eReady,
+	eTaskState_eRunning,
+	eTaskState_eSuspended,
+	uxTaskGetNumberOfTasks,
+	uxTaskGetStackHighWaterMark,
+	uxTaskGetSystemState,
+	xTASK_STATUS,
+	TaskHandle_t
+};
 
 use serde::Serialize;
 
@@ -31,9 +48,16 @@ pub struct TaskInfo {
 
 impl From<xTASK_STATUS> for TaskInfo {
 	fn from(task: xTASK_STATUS) -> Self {
+		let name = String::from(match task.xHandle {
+			h if h == get_float_thread_handle() => "<float-thread>",
+			h if h == get_i2c_thread_handle  () => "<i2c-thread>",
+			_ => unsafe { CStr::from_ptr(task.pcTaskName) }.to_str()
+				.unwrap_or("<utf8-error-in-task-name>")
+		});
+
 		Self {
 			handle: task.xHandle,
-			name: unsafe { CStr::from_ptr(task.pcTaskName) }.to_str().map_or_default(String::from),
+			name,
 			task_number: task.xTaskNumber,
 			state: task.eCurrentState.into(),
 			priority: task.uxCurrentPriority,
@@ -98,19 +122,25 @@ fn get_task_status_list() -> Vec<xTASK_STATUS> {
 	buf
 }
 
-pub fn get_tasks() -> impl Iterator<Item = TaskInfo> {
+pub fn iter_tasks() -> impl Iterator<Item = TaskInfo> {
 	get_task_status_list().into_iter().map(TaskInfo::from)
 }
 
+pub fn get_tasks() -> Vec<TaskInfo> {
+	let mut vec = iter_tasks().collect::<Vec<_>>();
+	vec.sort_by_key(|task_info| task_info.task_number);
+	vec
+}
+
 fn print_task_info() {
-	info!("{:#?}", get_tasks().collect::<Vec<_>>().as_slice());
+	info!("{:#?}", get_tasks().as_slice());
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Serialize)]
 pub struct FutureStats {
-	polls: u32,
+	polls: Saturating<u32>,
 	total_time: Duration,
 	longest_time: Duration,
 }
@@ -120,8 +150,12 @@ pub type ProfilingData = HashMap<&'static str, RwLock<FutureStats>>;
 static mut PROFILING_DATA: Option<ProfilingData> = None;
 
 /// If profiling is enabled, return a reference to the profiling data map.
-pub fn get_profiling_data() -> Option<&'static mut ProfilingData> {
-	unsafe { (&raw mut PROFILING_DATA).as_mut_unchecked()}.as_mut()
+#[inline] pub fn get_profiling_data() -> Option<&'static mut ProfilingData> {
+	unsafe { PROFILING_DATA.as_mut() }
+}
+
+#[inline] fn profiling_enabled() -> bool {
+	unsafe { PROFILING_DATA.is_some() }
 }
 
 /// Enable profiling by populating the profiling data hashmap.
@@ -141,6 +175,7 @@ pub async fn profile<F: Future>(future: F, stats: Option<&mut RwLock<FutureStats
 	if let Some(stats) = stats {
 		// Profiling enabled
 		let mut future = pin!(future);
+		let mut lock_ok = true;
 
 		poll_fn(|cx| {
 			let start = Instant::now();
@@ -149,11 +184,19 @@ pub async fn profile<F: Future>(future: F, stats: Option<&mut RwLock<FutureStats
 
 			let elapsed = start.elapsed();
 
-			let current = stats.get_mut().expect("Profiling stats poisoned");
-
-			current.polls = current.polls.saturating_add(1);
-			current.total_time = current.total_time.saturating_add(elapsed);
-			current.longest_time = current.longest_time.max(elapsed);
+			if lock_ok {
+				match stats.get_mut() {
+					Ok(current) => {
+						current.polls += 1;
+						current.total_time = current.total_time.saturating_add(elapsed);
+						current.longest_time = current.longest_time.max(elapsed);
+					}
+					Err(poison) => {
+						error!("Profiling lock poisoned: {poison:?}");
+						lock_ok = false;
+					},
+				}
+			}
 
 			result
 		}).await

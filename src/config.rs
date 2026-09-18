@@ -1,10 +1,10 @@
 use crate::charter::Charter;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use heapless::String as HeaplessString;
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct SystemConfig {
 	pub wifi_ssid: HeaplessString<32>,
 	pub wifi_pass: HeaplessString<64>,
@@ -20,7 +20,7 @@ impl Default for SystemConfig {
 			wifi_pass: "floatware".try_into().unwrap(), // ditto
 			charter: Default::default(),
 			use_uart: false,
-			profiling: false,
+			profiling: true,
 		}
 	}
 }

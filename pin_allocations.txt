@@ -1,9 +1,9 @@
- 0: Voltage measurement
- 1: Current measurement
+ 0:
+ 1:
  2: Onboard ARGB LED
  3: Leak detection
- 4: SD SPI CLK
- 5: SD SPI MOSI
+ 4: SD SPI MOSI
+ 5: SD SPI CLK
  6: SD SPI MISO
  7: SD SPI CS (has onboard LED)
  8: I2C SCL

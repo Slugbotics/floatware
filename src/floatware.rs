@@ -1,29 +1,39 @@
-use crate::{prelude::*, tasks::{
-	button::boot_button_pressed_task,
-	charter::{
-		depth_control_task,
-		depth_target_update_task
+use crate::{
+	prelude::*,
+	tasks::{
+		button::boot_button_pressed_task,
+		charter::{
+			depth_control_task,
+			depth_target_update_task
+		},
+		i2c::initialize_i2c_thread,
+		leak_detection::leak_detection_task,
+		led::{led_cycle_task, led_selection_task},
+		sd_card::{
+			mount_sd_card,
+			read_config_from_sd,
+			sd_logging_task,
+			setup_sd_card
+		},
+		shutdown::{
+			shutdown_task,
+			Shutdown,
+		},
+		status::status_publishing_task,
+		stepper_controller::stepper_control_task,
+		*,
 	},
-	i2c::initialize_i2c_thread,
-	leak_detection::leak_detection_task,
-	led::{led_cycle_task, led_selection_task},
-	power_measurement::power_measurement_task,
-	sd_card::{
-		mount_sd_card,
-		read_config_from_sd,
-		sd_logging_task,
-		setup_sd_card
+	debugging::{
+		ProfilingData,
+		enable_profiling
 	},
-	shutdown::{
-		shutdown_task,
-		Shutdown,
-	},
-	status::status_publishing_task,
-	stepper_controller::stepper_control_task,
-	*,
-}, debugging::{ProfilingData}, profile};
+	profile,
+};
 
-use std::ptr::{read_volatile, write_volatile};
+use std::{
+	ptr::{read_volatile, write_volatile},
+	sync::OnceLock
+};
 
 use esp_idf_svc::{
 	eventloop::EspSystemEventLoop,
@@ -31,13 +41,13 @@ use esp_idf_svc::{
 		gpio::{Gpio9, PinDriver, Pull},
 		peripherals::Peripherals
 	},
-	http::server::EspHttpServer,
 	nvs::EspDefaultNvsPartition,
 	timer::EspTaskTimerService,
+	sys::{xTaskGetCurrentTaskHandle, TaskHandle_t}
 };
 
 use ws2812_esp32_rmt_driver::{driver::color::LedPixelColorGrbw32, LedPixelEsp32Rmt, RGB8};
-use crate::debugging::enable_profiling;
+
 ////////////////////////////////////////////////////////////////////////////////
 
 /// Macro that gets a receiver from a watch. There is a cap to the number of
@@ -56,6 +66,11 @@ macro_rules! take {
 	};
 }
 
+static FLOAT_THREAD_HANDLE: OnceLock<usize> = OnceLock::new();
+
+/// Using this in functions outside the float thread is probably not safe
+#[inline] pub fn get_float_thread_handle() -> TaskHandle_t { *FLOAT_THREAD_HANDLE.get().unwrap() as _ }
+
 // These are message channels that are shared across multiple threads. They need to
 // be `static` so we can be assured they will always exist for all threads to make
 // use of.
@@ -73,11 +88,13 @@ static RELEASE_UART_CHANNEL: UartReleaseUnsplitWatch = UartReleaseUnsplitWatch::
 /// Where we actually start setting up everything. This function is responsible for
 /// spawning the remaining threads, initializing peripherals, and spawning tasks.
 pub async fn float_thread() -> Void {
+	FLOAT_THREAD_HANDLE.set(unsafe { xTaskGetCurrentTaskHandle() as usize}).unwrap(/* unreachable */);
+
 	////////////////////////////////////////
 	// Get handles to hardware resources
 
 	let mut peripherals = take!(Peripherals);
-	let should_reset = boot_button_pressed(&mut peripherals.pins.gpio9);
+	let should_reset = boot_button_pressed(&mut peripherals.pins.gpio9).await;
 
 	let sys_loop = take!(EspSystemEventLoop);
 	let timer_service = EspTaskTimerService::new()?;
@@ -86,7 +103,6 @@ pub async fn float_thread() -> Void {
 	////////////////////////////////////////
 	// Create non-static communication channels
 
-	let power_measurement_request_channel = PowerMeasurementRequestUnsplitChannel::new();
 	let status_channel = SystemStatusUnsplitWatch::new();
 	let led_state_channel = LedStateSignal::new();
 	let stepper_state_channel = StepperStateSignal::new();
@@ -97,8 +113,8 @@ pub async fn float_thread() -> Void {
 
 	let sd_card_driver = setup_sd_card(
 		peripherals.spi2, // SPI1 is very limited
-		peripherals.pins.gpio4, // SCLK
-		peripherals.pins.gpio5, // MOSI
+		peripherals.pins.gpio5, // SCLK
+		peripherals.pins.gpio4, // MOSI
 		peripherals.pins.gpio6, // MISO
 		peripherals.pins.gpio7, // CS
 	).map(Some).unwrap_or_else(|error| {
@@ -144,7 +160,7 @@ pub async fn float_thread() -> Void {
 		I2C_CHANNEL.receiver()
 	).map_err(damn!("Failed to initialize I2C thread"))?;
 
-	let _http_server: EspHttpServer = http::initialize_http_server(
+	let _http_server = http::initialize_http_server(
 		&SHUTDOWN_CHANNEL,
 		I2C_CHANNEL.sender(),
 		CHARTER_STATE_CHANNEL.sender(),
@@ -174,23 +190,17 @@ pub async fn float_thread() -> Void {
 			wrecv!(status_channel),
 			&stepper_state_channel, // writer
 		)),
-		profile!(stepper_control_task(
-			config.use_uart.then_some(peripherals.uart1),
-			peripherals.pins.gpio18.into(), // RX + TX
-			peripherals.pins.gpio20, // dir
-			peripherals.pins.gpio21, // step
-			&stepper_state_channel, // reader
-			wrecv!(RELEASE_UART_CHANNEL),
-		)),
+		// profile!(stepper_control_task(
+		// 	config.use_uart.then_some(peripherals.uart1),
+		// 	peripherals.pins.gpio18.into(), // RX + TX
+		// 	peripherals.pins.gpio20, // dir
+		// 	peripherals.pins.gpio21, // step
+		// 	&stepper_state_channel, // reader
+		// 	wrecv!(RELEASE_UART_CHANNEL),
+		// )),
 		profile!(leak_detection_task(
 			peripherals.pins.gpio3,
 			&SHUTDOWN_CHANNEL, // writer
-		)),
-		profile!(power_measurement_task(
-			peripherals.adc1,
-			peripherals.pins.gpio0, // voltage ADC
-			peripherals.pins.gpio1, // current ADC
-			power_measurement_request_channel.receiver(),
 		)),
 		// ========== I/O ==========
 		profile!(boot_button_pressed_task(
@@ -214,7 +224,6 @@ pub async fn float_thread() -> Void {
 		)),
 		// ========== Internal Housekeeping ==========
 		profile!(status_publishing_task(
-			power_measurement_request_channel.sender(),
 			status_channel.sender(),
 			I2C_CHANNEL.sender(),
 			wrecv!(CHARTER_STATE_CHANNEL),
@@ -342,14 +351,26 @@ async fn reset_usb_gpio() {
 }
 
 /// Creates a short-lived input driver to read the state of GPIO9's button.
-fn boot_button_pressed(input: &mut Gpio9) -> bool {
+async fn boot_button_pressed(input: &mut Gpio9<'_>) -> bool {
 	match PinDriver::input(
 		// We need (temporary) ownership of the pin, so we reborrow it, knowing that the
 		// driver that owns this reference will be dropped at the end of this block.
 		unsafe { input.reborrow() },
 		Pull::Up
 	) {
-		Ok(driver) => driver.is_low(), // Button is active-low
+		Ok(mut driver) => {
+			// Button is active-low
+			if driver.is_low() {
+				// wait for release before continuing, so that it does not accidentally
+				// trigger the button task
+				if let Err(error) = driver.wait_for_high().await {
+					warn!("Error waiting for boot button to be unpressed: {error:?}");
+				}
+				true
+			} else {
+				false
+			}
+		}
 		Err(error) => {
 			warn!("Unable to create input driver to check boot button: {error:#?}");
 			false

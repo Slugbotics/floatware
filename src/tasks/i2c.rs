@@ -19,7 +19,7 @@ use crate::{
 use std::{
 	thread::{Builder as ThreadBuilder, JoinHandle}
 };
-
+use std::sync::OnceLock;
 use esp_idf_svc::{
 	hal::{
 		gpio::{InputPin, OutputPin},
@@ -36,59 +36,59 @@ use esp_idf_svc::{
 };
 
 use cfor::cfor;
-
+use esp_idf_svc::sys::{xTaskGetCurrentTaskHandle, TaskHandle_t};
 use futures::channel::oneshot::Sender as OneshotSender;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-#[derive(Debug)]
-pub struct TempHumidityResponse {
-	pub celsius: u8,
-	/// A percentage.
-	pub relative_humidity: u8
-}
-
-impl Default for TempHumidityResponse {
-	fn default() -> Self {
-		TempHumidityResponse {
-			celsius: 0,
-			relative_humidity: 0,
+macro_rules! make_i2c_commands {
+    ($($name:ident: $response:ident { $($fields:tt)* }),+ $(,)?) => {
+		pub enum I2cCommand {
+			$(
+				$name {
+					response: OneshotSender<$response>
+				},
+			)+
 		}
-	}
-}
-
-#[derive(Debug)]
-pub struct DepthResponse {
-	pub depth: Depth,
-}
-
-impl Default for DepthResponse {
-	fn default() -> Self {
-		DepthResponse {
-			depth: 0.
+		impl I2cCommand {
+			pub fn name(&self) -> &'static str {
+				match self {
+					$(
+						Self::$name { .. } => stringify!($name),
+					)+
+				}
+			}
 		}
-	}
+		$(
+			#[derive(Debug, Default, Copy, Clone)]
+			pub struct $response {
+				$($fields)*
+			}
+		)+
+	};
 }
 
-pub enum I2cCommand {
-	GetTH {
-		response: OneshotSender<TempHumidityResponse>,
+make_i2c_commands!(
+	GetTH: TempHumidityResponse {
+		pub celsius: u8,
+		/// A percentage.
+		pub relative_humidity: u8
 	},
-	GetDepth {
-		response: OneshotSender<DepthResponse>
-	}
-}
-
-impl I2cCommand {
-	fn name(&self) -> &'static str {
-		match self {
-			I2cCommand::GetTH { .. } => "T&H",
-			I2cCommand::GetDepth { .. } => "Depth"
-		}
-	}
-}
+	GetDepth: DepthResponse {
+		pub depth: Depth,
+	},
+	GetPower: PowerResponse {
+		pub current: u16,
+		pub voltage: u16,
+	},
+);
 
 ////////////////////////////////////////////////////////////////////////////////
+
+static I2C_THREAD_HANDLE: OnceLock<usize> = OnceLock::new();
+
+/// Using this in functions outside the float thread is probably not safe
+#[inline] pub fn get_i2c_thread_handle() -> TaskHandle_t { *I2C_THREAD_HANDLE.get().unwrap() as _ }
 
 /// Spawn a separate FreeRTOS thread for the I2C handler task, then return a handle
 /// to it.
@@ -100,8 +100,10 @@ pub fn initialize_i2c_thread(
 	scl: impl InputPin + OutputPin + 'static,
 	receiver: I2cReceiver<'static>,
 ) -> Result<JoinHandle<Never>, AnyhowError> {
+	I2C_THREAD_HANDLE.set(unsafe { xTaskGetCurrentTaskHandle() as usize}).unwrap(/* unreachable */);
+
 	let driver = I2cDriver::new(i2c, sda, scl, &I2cConfig {
-		baudrate: Hertz(100_000), // pressure sensor max is 400 kHz
+		baudrate: Hertz(100_000),
 		// timeout: Some(Duration::from_millis(100).into()), // probably excessive
 		..Default::default()
 	}).map_err(damn!("Failed to create i2c driver"))?;
@@ -145,6 +147,10 @@ mod p_sensor {
 	pub const CMD_CONVERT_D2: u8 = 0x50;
 }
 
+mod power_sensor {
+	pub const ADDR: u8 = 0x40; // A0 = A1 = GND
+}
+
 const TIMEOUT_1S: TickType_t = TickType::new_millis(1000).0;
 
 #[derive(Default)]
@@ -152,6 +158,7 @@ struct I2cDevicesStatus {
 	th_present: bool,
 	pressure_present: bool,
 	pressure_prom: [u8; 14],
+	power_sensor_present: bool,
 }
 
 async fn i2c_thread<'a>(
@@ -213,6 +220,8 @@ struct I2cResetStatus {
 
 	let pressure_init = pressure_sensor_reset_and_read_prom(i2c);
 
+	// TODO: init INA260
+
 	I2cResetStatus {
 		th_init,
 		pressure_init,
@@ -250,8 +259,8 @@ struct I2cResetStatus {
 ) -> Result<(), AnyhowError> {
 	debug!("Handling i2c command {}", cmd.name());
 
-	match cmd {
-		I2cCommand::GetTH { response } => Ok(
+	Ok(match cmd {
+		I2cCommand::GetTH { response } =>
 			if device_status.th_present {
 				let packet = get_temp_humidity(i2c).await?;
 
@@ -261,9 +270,8 @@ struct I2cResetStatus {
 				}
 			} else {
 				let _ = response.send(Default::default());
-			}
-		),
-		I2cCommand::GetDepth { response } => Ok(
+			},
+		I2cCommand::GetDepth { response } =>
 			if device_status.pressure_present {
 				let packet = get_pressure(i2c).await?;
 
@@ -272,12 +280,28 @@ struct I2cResetStatus {
 				}
 			} else {
 				let _ = response.send(Default::default());
-			}
-		)
-	}
+			},
+		I2cCommand::GetPower { response } =>
+			if device_status.power_sensor_present {
+				let packet = get_power(i2c).await?;
+
+				if response.send(packet).is_err() {
+					warn!("I2C Power: receiver dropped");
+				}
+			} else {
+				let _ = response.send(Default::default());
+			},
+	})
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+
+#[inline] async fn get_power(
+	i2c: &mut I2cDriver<'_>
+) -> Result<PowerResponse, AnyhowError> {
+	//! TODO
+	Ok(Default::default())
+}
 
 #[inline] async fn get_temp_humidity(
 	i2c: &mut I2cDriver<'_>,
@@ -333,7 +357,7 @@ struct I2cResetStatus {
 	i2c: &mut I2cDriver<'_>,
 ) -> Result<DepthResponse, AnyhowError> {
 	//! TODO
-	Ok(DepthResponse { depth: 0. })
+	Ok(Default::default())
 }
 
 ////////////////////////////////////////////////////////////////////////////////

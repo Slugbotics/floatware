@@ -28,7 +28,8 @@ use std::{
 };
 
 use esp_idf_svc::hal::task::block_on;
-
+use time::error::Format;
+use time::macros::format_description;
 use time::Timestamp;
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -58,7 +59,7 @@ fn main() {
 
 	match thread::Builder::new()
 		.name("float-thread".to_string())
-		.stack_size(64 * 1024)
+		.stack_size(16 * 1024)
 		.spawn(move || {
 			// This closure is the synchronous root of the float-thread.
 			block_on(floatware::float_thread())
@@ -66,7 +67,7 @@ fn main() {
 		Err(spawning_err) => error!("FATAL: Unable to spawn float thread: {spawning_err:#?}"),
 		Ok(handle) => match handle.join() {
 			Err(thread_panic) => error!("FATAL: Float thread panicked: {thread_panic:#?}"),
-			// The return value of initialize is then returned inside Ok():
+			// The return value of `float_thread()` is then returned inside Ok():
 			Ok(Err(error)) => error!("FATAL: Float thread returned error: {error:#?}"),
 			Ok(Ok(())) => info!("Float thread returned normally. Shutting down."),
 		},
@@ -85,7 +86,7 @@ static mut BOOT_TIMESTAMP: Option<Timestamp> = None;
 /// Return either the time since boot, or the current Unix time.
 pub fn get_time() -> TimeContainer {
 	unsafe {
-		BOOT_TIMESTAMP.map(Into::into)
+		BOOT_TIMESTAMP.map(|ts| TimeContainer::Timestamp(ts))
 			.unwrap_or_else(|| (Instant::now() - BOOT_TIME.unwrap()).into())
 	}
 }
@@ -115,8 +116,13 @@ impl Display for TimeContainer {
 		match self {
 			Self::SinceBoot(duration) =>
 				f.write_fmt(format_args!("{}.{:06}", duration.as_secs(), duration.subsec_micros())),
-			Self::Timestamp(timestamp) =>
-				Display::fmt(&timestamp, f),
+			Self::Timestamp(timestamp) => {
+				let res = timestamp.format(format_description!("[year]-[month]-[day] [hour]:[minute]:[second].[subsecond]"));
+				f.write_str(match &res {
+					Ok(s) => s.as_str(),
+					Err(_) => "<time format error>"
+				})
+			}
 		}
 	}
 }

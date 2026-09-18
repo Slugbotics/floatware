@@ -1,17 +1,21 @@
 use crate::{
 	prelude::*,
 	tasks::{
-		charter::Charter,
 		status::SystemStatus
 	}
 };
 
 use std::{
 	fs::{File, OpenOptions},
-	io::ErrorKind,
-	io::Write
+	io::{
+		ErrorKind,
+		Write
+	},
+	time::Instant
 };
-
+use std::ffi::OsStr;
+use std::fs::{read_dir, DirEntry};
+use anyhow::Error;
 use esp_idf_svc::{
 	fs::fatfs::{
 		config::{FatFsType, FormatConfiguration},
@@ -37,16 +41,14 @@ use esp_idf_svc::{
 	},
 	io::vfs::MountedFatfs,
 };
-
-use heapless::String as HeaplessString;
-
+use itertools::Itertools;
 use serde::Deserialize;
 use crate::config::SystemConfig;
 ////////////////////////////////////////////////////////////////////////////////
 
 macro_rules! open_file {
-    ($path:expr) => { OpenOptions::new().read(true).append(true).create(true).open(sd!($path)).map_err(damn!("Failed to open {}", $path))? };
     ($path:literal) => { OpenOptions::new().read(true).append(true).create(true).open(sd!($path)).map_err(damn!(concat!("Failed to open ", $path)))? };
+    ($path:expr) => { OpenOptions::new().read(true).append(true).create(true).open(sd!($path)).map_err(damn!("Failed to open {}", $path))? };
 }
 
 pub type FSHandle<'a> = MountedFatfs<Fatfs<SdCardDriver<SdSpiHostDriver<'a, SpiDriver<'a>>>>>;
@@ -69,6 +71,8 @@ pub fn setup_sd_card<'a>(
 		}
 	).map_err(damn!("Failed to initialize SPI bus driver"))?;
 
+	info!("Created SPI bus driver");
+
 	// Spi device config (CS etc)
 	let sd_spi_device_driver = SdSpiHostDriver::new(
 		spi_bus_driver,
@@ -79,9 +83,13 @@ pub fn setup_sd_card<'a>(
 		None // Write protection config
 	).map_err(damn!("Failed to initialize underlying SD SPI device driver"))?;
 
+	info!("Initialized SDSPI");
+
 	let sd_card_driver = SdCardDriver::new_spi(
 		sd_spi_device_driver, &SdConfiguration::default(/* todo */)
 	).map_err(damn!("Failed to initialize SD card driver"))?;
+
+	info!("Initialized SD driver");
 
 	Ok(sd_card_driver)
 }
@@ -92,6 +100,8 @@ pub fn mount_sd_card<'a>(
 	sd_card_driver: SdCardDriver<SdSpiHostDriver<'a, SpiDriver<'a>>>,
 	should_format: bool
 ) -> Result<FSHandle<'a>, AnyhowError> {
+	info!("Beginning SD fs mount");
+
 	let mut fatfs = Fatfs::new_sdcard(
 		0, // Drive number. This is the first & only SD card, so 0.
 		sd_card_driver
@@ -102,17 +112,28 @@ pub fn mount_sd_card<'a>(
 
 		let mut buf = [0u8; 4096 /* TODO */];
 
-		fatfs.format(&FormatConfiguration {
+		let config = &FormatConfiguration {
 			fs_type: FatFsType::ExFat, // so we don't worry about log file sizes
 			fat_backup_copy: true, // place a backup FAT table at the end(?) of the card
 			..Default::default()
-		}, &mut buf).map_err(damn!("Failed to format SD card"))?;
+		};
+		let start = Instant::now();
+		let result = fatfs.format(config, &mut buf);
+		let elapsed = start.elapsed();
+
+		match result {
+			Ok(()) => info!("Formatted SD card in {} us", elapsed.as_micros()),
+			Err(error) => {
+				warn!("Failed to format SD card: {error} ({} us)", elapsed.as_micros());
+				return Err(error.into());
+			}
+		}
 	}
 
 	// Not to be confused with esp_idf_svc::fs::fatfs::MountedFatfs
 	// This is the vfs fatfs mount, which provides a higher layer of abstraction and allows
 	// using Rust's std File objects.
-	MountedFatfs::mount(
+	let fs = MountedFatfs::mount(
 		fatfs,
 		// Mountpoint to prepend to file paths
 		concat!("/", SD_CARD_NAME!()),
@@ -120,17 +141,54 @@ pub fn mount_sd_card<'a>(
 		// you exceed this number, nor the lifetime of an fd here (related to `File` object
 		// lifetime, presumably). So TODO investigate FD count
 		4
-	).map_err(damn!("Failed to mount filesystem"))
+	).map_err(damn!("Failed to mount filesystem"))?;
+
+	info!("Successfully mounted SD card, found files: {}", read_dir(sd!(""))
+		.map_err(damn!("Failed to read /sd/"))?
+		.filter_map(Result::ok)
+		.format_with(", ", |entry, f| f(&entry.file_name().to_string_lossy())
+	));
+
+	Ok(fs)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 
 pub fn read_config_from_sd() -> Result<SystemConfig, AnyhowError> {
-	SystemConfig::deserialize(
-		&mut serde_json::Deserializer::from_reader(
-			File::open(sd!("config.json")).map_err(damn!("Failed to read config"))?
-		)
-	).map_err(damn!("Failed to deserialize config"))
+	match File::open(sd!("CONFIG.JSON")).map_err(damn!("Failed to read config")) {
+		Ok(file) => SystemConfig::deserialize(
+			&mut serde_json::Deserializer::from_reader(file)
+		).map_err(damn!("Failed to deserialize config")),
+
+		Err(error) => {
+			warn!("Failed to read config file: {error}");
+
+			let config = SystemConfig::default();
+
+			let mut file = match File::create(sd!("CONFIG.JSON")) {
+				Ok(file) => file,
+				Err(error) => {
+					warn!("Failed to create config file: {error}");
+					return Ok(config);
+				},
+			};
+
+			let content = match serde_json::to_string_pretty(&config) {
+				Ok(content) => content,
+				Err(error) => {
+					warn!("Failed to serialize default config: {error}");
+					return Ok(config);
+				},
+			};
+
+			if let Err(error) = file.write_all(content.as_bytes()) {
+				warn!("Failed to write default config: {error}")
+			}
+
+			Ok(config)
+		}
+	}
+
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -138,7 +196,7 @@ pub fn read_config_from_sd() -> Result<SystemConfig, AnyhowError> {
 /// Appends to a series of log files whenever it receives [SystemStatus] objects
 /// with `create_log_entry == true`.
 ///
-/// **Blocks entire FreeRTOS thread on write!** If the write operations are
+/// **Blocks the entire FreeRTOS thread on write!** If the write operations are
 /// expensive, it may be worthwhile to consider creating an I/O thread like I2C.
 pub async fn sd_logging_task(
 	mut status_receiver: SystemStatusReceiver<'_>,
@@ -151,12 +209,10 @@ pub async fn sd_logging_task(
 	}
 
 	let mut log_file_counter = 0u8;
-	let mut log_file = open_file!("status_log_000.txt");
+	let mut log_file = open_file!("LOG000.txt");
 
 	loop {
-		let snapshot = status_receiver.get_and(SystemStatus::create_log_entry).await;
-
-		info!("LOGGING: {snapshot}");
+		let snapshot = status_receiver.changed_and(SystemStatus::create_log_entry).await;
 
 		loop {
 			match write!(&mut log_file, "{snapshot}\n") {

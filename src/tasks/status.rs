@@ -4,7 +4,6 @@ use crate::{get_time, prelude::*, tasks::{
 		Depth
 	},
 	i2c::I2cCommand,
-	power_measurement::PowerMeasurement,
 }, TimeContainer};
 
 use std::fmt::{
@@ -18,7 +17,7 @@ use futures::{
 	channel::oneshot::channel,
 	join
 };
-
+use crate::tasks::i2c::PowerResponse;
 ////////////////////////////////////////////////////////////////
 
 const SNAPSHOT_INTERVAL_MS: u64 = 500;
@@ -26,7 +25,7 @@ const SNAPSHOT_INTERVAL_MS: u64 = 500;
 #[derive(Debug, Clone)]
 pub struct SystemStatus {
 	pub depth: Depth,
-	pub power_measurement: PowerMeasurement,
+	pub power_measurement: PowerResponse,
 	pub charter_state: Option<CharterState>,
 
 	pub timestamp: TimeContainer,
@@ -58,11 +57,12 @@ impl Display for SystemStatus {
 /// Tasks can read their channel to see the current system state without having to
 /// query the hardware themselves.
 pub async fn status_publishing_task(
-	power_measurement_request_sender: PowerMeasurementRequestSender<'_>,
 	status_sender: SystemStatusSender<'_>,
 	i2c_sender: I2cSender<'_>,
 	mut charter_state_receiver: CharterStateReceiver<'_>,
 ) -> Never {
+	sleep_ms!(SNAPSHOT_INTERVAL_MS);
+
 	let mut counter = 0;
 	loop {
 		counter += 1;
@@ -79,7 +79,7 @@ pub async fn status_publishing_task(
 			let (depth_tx, depth_rx) = channel();
 
 			let (_, power, _, depth) = join!(
-				power_measurement_request_sender.send(power_tx),
+				i2c_sender.send(I2cCommand::GetPower { response: power_tx }),
 				power_rx,
 				i2c_sender.send(I2cCommand::GetDepth { response: depth_tx }),
 				depth_rx,
@@ -99,14 +99,18 @@ pub async fn status_publishing_task(
 
 		let charter_state = charter_state_receiver.try_get();
 
-		status_sender.send(SystemStatus {
+		let status = SystemStatus {
 			depth,
 			power_measurement,
 			charter_state,
 
 			timestamp: get_time(),
 			create_log_entry,
-		});
+		};
+
+		if create_log_entry { info!("{status}"); }
+
+		status_sender.send(status);
 
 		sleep_ms!(SNAPSHOT_INTERVAL_MS);
 	}

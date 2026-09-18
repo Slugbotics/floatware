@@ -30,6 +30,7 @@ pub(crate) type Never = Result<Infallible, AnyhowError>;
 
 /// Creates a closure that generates an error message and then returns the argument
 /// wrapped inside an [AnyhowError]. Intended for use with [Result::map_err].
+/// TODO: [anyhow::context]
 #[macro_export] macro_rules! damn {
 	($($args:tt)+) => {
 		|err__| {
@@ -81,6 +82,8 @@ macro_rules! SD_CARD_NAME {
 }
 
 /// Create a full path, with the SD card's mountpoint, for the provided file path.
+///
+/// **Filenames must be all caps.**
 #[macro_export] macro_rules! sd {
     ($path:literal) => {
 		concat!("/", SD_CARD_NAME!(), "/", $path)

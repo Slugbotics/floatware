@@ -124,7 +124,6 @@ pub(crate) async fn led_selection_task(
 	led_state_signal: &LedStateSignal,
 	mut status_receiver: SystemStatusReceiver<'_>,
 	button_led_signal: &LedColorSignal,
-	uart_release_receiver: UartReleaseReceiver<'_>
 ) -> Never {
 	loop {
 		let status = status_receiver.changed().await;
@@ -154,10 +153,6 @@ pub(crate) async fn led_selection_task(
 
 		if let Some(button_led) = button_led {
 			led_vec.push(button_led);
-		}
-
-		if uart_release_receiver.contains_value() {
-			led_vec.push(PINK);
 		}
 
 		led_vec.push(charter_led);

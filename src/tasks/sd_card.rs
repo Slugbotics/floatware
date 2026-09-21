@@ -1,21 +1,26 @@
+//! Filenames must be all-caps, and extensions must be three or less characters.
+//! TODO: SD card eject?
+
 use crate::{
 	prelude::*,
 	tasks::{
 		status::SystemStatus
-	}
+	},
+	config::SystemConfig
 };
 
 use std::{
-	fs::{File, OpenOptions},
+	fs::{
+		OpenOptions,
+		read_dir
+	},
 	io::{
 		ErrorKind,
 		Write
 	},
-	time::Instant
+	time::Instant,
 };
-use std::ffi::OsStr;
-use std::fs::{read_dir, DirEntry};
-use anyhow::Error;
+use std::fs::read_to_string;
 use esp_idf_svc::{
 	fs::fatfs::{
 		config::{FatFsType, FormatConfiguration},
@@ -41,9 +46,11 @@ use esp_idf_svc::{
 	},
 	io::vfs::MountedFatfs,
 };
+
 use itertools::Itertools;
+
 use serde::Deserialize;
-use crate::config::SystemConfig;
+
 ////////////////////////////////////////////////////////////////////////////////
 
 macro_rules! open_file {
@@ -155,9 +162,9 @@ pub fn mount_sd_card<'a>(
 ////////////////////////////////////////////////////////////////////////////////
 
 pub fn read_config_from_sd() -> Result<SystemConfig, AnyhowError> {
-	match File::open(sd!("CONFIG.JSON")).map_err(damn!("Failed to read config")) {
-		Ok(file) => SystemConfig::deserialize(
-			&mut serde_json::Deserializer::from_reader(file)
+	match read_to_string(sd!("CONFIG.JSN")) {
+		Ok(string) => SystemConfig::deserialize(
+			&mut serde_json::Deserializer::from_str(&string)
 		).map_err(damn!("Failed to deserialize config")),
 
 		Err(error) => {
@@ -165,7 +172,10 @@ pub fn read_config_from_sd() -> Result<SystemConfig, AnyhowError> {
 
 			let config = SystemConfig::default();
 
-			let mut file = match File::create(sd!("CONFIG.JSON")) {
+			let mut file = match OpenOptions::new()
+				.create_new(true)
+				.write(true)
+				.open(sd!("CONFIG.JSN")) {
 				Ok(file) => file,
 				Err(error) => {
 					warn!("Failed to create config file: {error}");

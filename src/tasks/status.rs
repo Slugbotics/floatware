@@ -1,10 +1,15 @@
-use crate::{get_time, prelude::*, tasks::{
-	charter::{
-		CharterState,
-		Depth
+use crate::{
+	prelude::*,
+	tasks::{
+		charter::CharterState,
+		i2c::{
+			I2cCommand,
+			PowerResponse,
+			pressure_sensor::Depth
+		}
 	},
-	i2c::I2cCommand,
-}, TimeContainer};
+	timekeeping::{get_time, TimeContainer}
+};
 
 use std::fmt::{
 	Debug,
@@ -17,10 +22,11 @@ use futures::{
 	channel::oneshot::channel,
 	join
 };
-use crate::tasks::i2c::PowerResponse;
+
 ////////////////////////////////////////////////////////////////
 
-const SNAPSHOT_INTERVAL_MS: u64 = 500;
+const SNAPSHOT_INTERVAL_MS: u64 = 100;
+const LOG_INTERVAL_SNAPSHOT_COUNT: u32 = 10;
 
 #[derive(Debug, Clone)]
 pub struct SystemStatus {
@@ -39,9 +45,9 @@ impl SystemStatus {
 impl Display for SystemStatus {
 	fn fmt(&self, fmt: &mut Formatter<'_>) -> Result<(), FmtError> {
 		fmt.write_fmt(format_args!(
-			"[{}] depth: {}; voltage: {}; current: {}; charter state: ",
-			self.timestamp, self.depth, self.power_measurement.voltage,
-			self.power_measurement.current))?;
+			"[{}] depth: {}; voltage: {} mV; current: {} mA; charter state: ",
+			self.timestamp, self.depth, self.power_measurement.mv,
+			self.power_measurement.ma))?;
 
 		if let Some(ref state) = self.charter_state {
 			Display::fmt(&state, fmt)
@@ -66,7 +72,7 @@ pub async fn status_publishing_task(
 	let mut counter = 0;
 	loop {
 		counter += 1;
-		let create_log_entry = counter == 10;
+		let create_log_entry = counter == LOG_INTERVAL_SNAPSHOT_COUNT;
 		if create_log_entry {
 			counter = 0;
 		}

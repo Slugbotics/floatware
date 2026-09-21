@@ -6,7 +6,6 @@ use crate::{
 		led::LedState,
 		stepper_controller::{
 			StepperState,
-			UartRelease
 		},
 		shutdown::ShutdownRequest,
 		status::SystemStatus,
@@ -32,7 +31,6 @@ use embassy_sync::{
 		CriticalSectionRawMutex
 	}
 };
-use futures::channel::oneshot::Sender;
 
 use smart_leds_trait::RGB8;
 
@@ -92,13 +90,6 @@ build_watch!(
 ///
 /// Written by HTTP `/start_dive`.
 	CharterState, MultiTaskMutex, 3
-);
-
-build_watch!(
-/// Used to communicate the signal for the UART controller to drop its UART driver.
-/// Not sure if this is actually needed though.
-/// Written from HTTP `/release_uart`
-	UartRelease, MultiTaskMutex, 2
 );
 
 build_watch!(

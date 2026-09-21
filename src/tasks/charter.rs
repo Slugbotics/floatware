@@ -1,27 +1,27 @@
 use crate::{
-	prelude::*
+	prelude::*,
+	tasks::{
+		stepper_controller::StepperState,
+		i2c::pressure_sensor::Depth
+	}
 };
 
 use std::{
+	fmt::{Display, Formatter, Result as FmtResult},
 	time::{
 		Duration,
 		Instant
-	},
-	fmt::{Display, Formatter, Result as FmtResult}
+	}
 };
 
 use embassy_time::WithTimeout;
-use crate::tasks::stepper_controller::StepperState;
+
 ////////////////////////////////////////////////////////////////////////////////
 
-/// TODO based on I2C depth sensor driver code
-pub type Depth = f64;
-/// First argument is the amount of time after starting the dive that we should be
-/// at this [Depth]. The duration that we are at that depth is the following entry's
-/// [Duration] minus this one.
-/// 
-/// WARNING: durations of more than 584542 years may lead to an error in the sleep code.
-pub type DepthEntry = (Duration, Depth);
+/// First argument is the amount of time, in milliseconds, after starting the dive
+/// that we should be at this [Depth]. The duration that we are at that depth is the
+/// following entry's [Duration] minus this one.
+pub type DepthEntry = (u32, Depth);
 
 /// Maps the time after starting the descent, to a target depth.
 /// Note that the last entry will, for implementation reasons, always be effectively
@@ -49,10 +49,16 @@ pub enum CharterState {
 impl Display for CharterState {
 	fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
 		match self {
-			Self::StartRequested => f.write_str("StartRequested"),
-			Self::InProgress { charter_index, target_depth, charter_size } =>f.write_fmt(format_args!("InProgress {{ {charter_index}/{charter_size}: {target_depth} }}")),
-			Self::Completed => f.write_str("Completed"),
-			Self::Aborted { reason } => f.write_fmt(format_args!("Aborted {{ {reason} }}"))
+			Self::StartRequested =>
+				f.write_str("StartRequested"),
+			Self::InProgress { charter_index, target_depth, charter_size } =>
+				f.write_fmt(format_args!(
+					"InProgress {{ {charter_index}/{}: {target_depth} }}", charter_size - 1
+				)),
+			Self::Completed =>
+				f.write_str("Completed"),
+			Self::Aborted { reason } =>
+				f.write_fmt(format_args!("Aborted {{ {reason} }}"))
 		}
 	}
 }
@@ -67,7 +73,8 @@ impl Display for AbortReason {
 	fn fmt<'a>(&self, f: &mut Formatter<'_>) -> FmtResult {
 		match self {
 			AbortReason::CharterStateError { offending_charter_index } => {
-				f.write_fmt(format_args!("Invalid charter state: InProgress({offending_charter_index}) at beginning of depth_target_update_task"))
+				f.write_fmt(format_args!(
+					"Invalid charter state: InProgress({offending_charter_index}) at beginning of depth_target_update_task"))
 			}
 			AbortReason::Shutdown => f.write_str("Shutdown")
 		}
@@ -116,9 +123,12 @@ pub async fn depth_target_update_task(
 			let time_since_start = start.elapsed();
 
 			// We need to wait another (start_time - time_since_start)
+			let wait_time = Duration::from_millis
+				(*target_start_time as _).saturating_sub(time_since_start);
+
 			if sleep_and_check_aborted(
 				&mut charter_state_receiver,
-				target_start_time.saturating_sub(time_since_start)
+				wait_time
 			).await.is_some() {
 				info!("Depth target task: aborting charter");
 				// We are aborting, stop setting new charter states
@@ -127,7 +137,7 @@ pub async fn depth_target_update_task(
 			}
 
 			info!("New target: {target_depth:?}, {} seconds after start",
-				target_start_time.as_secs());
+				target_start_time / 1000);
 
 			// Because the esp32c3 is single-core, we avoid a race condition, wherein an Aborted
 			// value is inserted into the receiver between where we check for one above and where
@@ -188,6 +198,8 @@ pub async fn depth_control_task(
 
 				let current_depth = status_receiver.get().await.depth;
 
+				// TODO: adjust stepper to get closer to target, then sleep or something
+
 				stepper_state_channel.signal(
 					if current_depth > target_depth {
 						StepperState::WeAreTooLow
@@ -196,7 +208,7 @@ pub async fn depth_control_task(
 					}
 				);
 
-				// TODO: adjust stepper to get closer to target, then sleep or something
+				sleep_and_check_aborted(&mut charter_state_receiver, Duration::from_millis(100)).await;
 			}
 			CharterState::Aborted { reason: AbortReason::Shutdown } => {
 				go_to_surface().await;

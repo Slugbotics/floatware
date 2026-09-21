@@ -11,7 +11,7 @@ pub(crate) use {
 	crate::{
 		signals::*,
 		tasks::*,
-		damn, sleep, sleep_ms, ret_err, SD_CARD_NAME, sd
+		damn, sleep, sleep_ms, ret_err, SD_CARD_NAME, sd, not_unsafe
 	},
 	anyhow::Error as AnyhowError,
 	log::{debug, info, warn, error},
@@ -92,3 +92,13 @@ macro_rules! SD_CARD_NAME {
 		format!(concat!("/", SD_CARD_NAME!(), "/", "{}"), $path)
 	}
 }
+
+/// I like to be able to find all the `unsafe` code in my codebase by searching
+/// through it. However, all the esp-idf C functions are `unsafe`, despite many of
+/// them being safe to call. For this reason, I have this macro, which I simply use
+/// to indicate that an `unsafe` block doesn't actually do anything unsafe.
+/// 
+/// If you are actually using the faculties provided by `unsafe`, do not use this!
+#[macro_export] macro_rules! not_unsafe {
+     {$($code:tt)*} => { unsafe { $($code)* } };
+ }

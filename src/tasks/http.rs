@@ -15,49 +15,48 @@
 //! TODO: once I am done testing things with JSON typed into curl, port to MessagePack
 
 use crate::{
-	prelude::*,
-	set_boot_time,
-	tasks::{
-		i2c::I2cCommand,
-		charter::CharterState,
-		shutdown::ShutdownRequest,
-		stepper_controller::UartRelease
-	},
 	debugging::{
 		get_profiling_data,
 		get_tasks,
-	}
+	},
+	prelude::*,
+	tasks::{
+		charter::CharterState,
+		i2c::I2cCommand,
+		shutdown::ShutdownRequest,
+	},
+	timekeeping::{get_on_duration, set_boot_timestamp}
 };
 
+use std::str::from_utf8;
+
 use esp_idf_svc::{
+	hal::task::block_on,
 	http::server::{
 		EspHttpConnection,
 		EspHttpServer
 	},
-	io::EspIOError,
-	hal::task::block_on
+	io::EspIOError
 };
 
 use embedded_svc::{
 	http::server::{
-		CompositeHandler, Handler, Middleware, Connection
+		CompositeHandler, Connection, Handler, Middleware
 	},
 	http::{
 		Headers, Method
 	},
-	io::{
-		Read
-	}
+	io::Read
 };
-use serde_json::from_str;
+
 use time::Timestamp;
+
 ////////////////////////////////////////////////////////////////////////////////
 
 pub fn initialize_http_server<'server>(
 	shutdown_signal_sender: &'static ShutdownSignal,
 	i2c_sender: I2cSender<'static>,
 	charter_state_sender: CharterStateSender<'static>,
-	uart_release_sender: UartReleaseSender<'static>,
 ) -> Result<EspHttpServer<'server>, EspIOError> {
 	let mut server = EspHttpServer::new(&Default::default())?;
 
@@ -70,7 +69,6 @@ pub fn initialize_http_server<'server>(
 		.handler("/shutdown",     Method::Post, pep(PostShutdown { shutdown_signal_sender }))?
 		.handler("/start_dive",   Method::Post, pep(PostStartDive { charter_state_sender }))?
 		.handler("/time_sync",    Method::Post, pep(PostTimeSync))?
-		.handler("/release_uart", Method::Post, pep(PostReleaseUart { uart_release_sender }))?
 	;
 
 	info!("Server object successfully created");
@@ -80,7 +78,7 @@ pub fn initialize_http_server<'server>(
 
 ////////////////////////////////////////////////////////////////////////////////
 
-/// Noop req. We don't use PlainErrorPage to make handling the connection faster.
+/// Noop request. We don't use PlainErrorPage to make handling the connection faster.
 struct GetHeartbeat;
 impl<'request> Handler<EspHttpConnection<'request>> for GetHeartbeat {
 	type Error = AnyhowError;
@@ -155,7 +153,16 @@ impl<'request> Handler<EspHttpConnection<'request>> for PostTimeSync {
 
 	fn handle(&self, conn: &mut EspHttpConnection) -> Result<(), AnyhowError> {
 		// The control station will have to account for connection latency
-		set_boot_time(serde_json::from_slice(read_body(conn)?.as_slice())?);
+
+		let now: Timestamp = Timestamp::from_nanoseconds(
+			from_utf8(
+				&read_body(conn)?
+			)?.parse()?
+		)?;
+
+		if !set_boot_timestamp(now - get_on_duration()) {
+			return reply(conn, 409, "Time already set".into());
+		}
 
 		reply_204(conn)
 	}
@@ -191,17 +198,6 @@ impl<'request> Handler<EspHttpConnection<'request>> for PostShutdown {
 
 	fn handle(&self, conn: &mut EspHttpConnection) -> Result<(), AnyhowError> {
 		self.shutdown_signal_sender.signal(ShutdownRequest { originator: "http request", go_to_surface: true });
-
-		reply_204(conn)
-	}
-}
-
-struct PostReleaseUart { uart_release_sender: UartReleaseSender<'static> }
-impl<'request> Handler<EspHttpConnection<'request>> for PostReleaseUart {
-	type Error = AnyhowError;
-
-	fn handle(&self, conn: &mut EspHttpConnection) -> Result<(), AnyhowError> {
-		self.uart_release_sender.send(UartRelease::Requested);
 
 		reply_204(conn)
 	}

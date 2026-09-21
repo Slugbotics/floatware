@@ -4,14 +4,17 @@
 //! Additionally, the LED changes while the button is held in order to indicate what
 //! will happen when it is released.
 
-use crate::prelude::*;
+use crate::{
+	prelude::*,
+	debugging::{get_tasks}
+};
 
 use esp_idf_svc::hal::gpio::{Gpio9, PinDriver, Pull};
 
 use embassy_time::{Duration, WithTimeout};
+
 use smart_leds_trait::RGB8;
-use crate::debugging::{get_tasks, iter_tasks};
-use crate::tasks::stepper_controller::UartRelease;
+
 ////////////////////////////////////////////////////////////////////////////////
 
 #[derive(Copy, Clone)]
@@ -45,7 +48,7 @@ const DURATIONS: [Con; 3] = Con::from_list([
 	( 200, led::NONE),
 	// TBD
 	(3000, led::YELLOW),
-	// Drop UART
+	// Eject SD card?
 	(6000, led::PINK),
 	// None; if you hold the button for too long, you can keep holding it until it resets to noop.
 ]);
@@ -53,7 +56,6 @@ const DURATIONS: [Con; 3] = Con::from_list([
 pub async fn boot_button_pressed_task(
 	boot_button: Gpio9<'_>,
 	led_color_signal: &LedColorSignal,
-	release_uart_signal: UartReleaseSender<'_>,
 ) -> Never {
 	let mut driver = PinDriver::input(boot_button, Pull::Up)
 		.map_err(damn!("Failed to initialize boot button input driver"))?;
@@ -87,9 +89,9 @@ pub async fn boot_button_pressed_task(
 						info!("{:#?}", get_tasks());
 					},
 					2 => {
-						// [3000, 6000) -> release UART
+						// [3000, 6000) -> eject SD card
 						info!("Unpress 2");
-						release_uart_signal.send(UartRelease::Requested);
+						// TODO
 					},
 					_ => unreachable!(),
 				}

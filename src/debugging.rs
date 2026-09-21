@@ -1,8 +1,14 @@
-use crate::{
-	floatware::get_float_thread_handle,
-	prelude::*,
-	tasks::i2c::get_i2c_thread_handle
-};
+//! Some useful functions:
+//! esp_get_free_heap_size()
+//! esp_get_free_heap_size()
+//! esp_get_minimum_free_heap_size()
+//! heap_caps_get_total_size(caps)
+//! heap_caps_get_free_size(caps)
+//! heap_caps_get_minimum_free_size(caps)
+//! heap_caps_get_largest_free_block(caps)
+//! heap_caps_get_info(&mut multi_heap_info_t, caps)
+
+use crate::{get_float_thread_handle, prelude::*, tasks::i2c::get_i2c_thread_handle};
 
 use std::{
 	collections::HashMap,
@@ -96,7 +102,7 @@ impl From<eTaskState> for TaskState {
 /// Return the minimum recorded amount of stack space (in bytes) remaining for the
 /// provided task handle, or the caller thread if null.
 #[inline] pub fn high_water_mark(handle: TaskHandle_t) -> u32 {
-	unsafe { uxTaskGetStackHighWaterMark(handle) }
+	not_unsafe! { uxTaskGetStackHighWaterMark(handle) }
 }
 
 /// Return the minimum recorded amount of stack space (in bytes) remaining for the
@@ -111,7 +117,7 @@ impl From<eTaskState> for TaskState {
 /// the time the number of tasks is measured and the vector is populated, the
 /// underlying C function will error and this function will return an empty vector.
 fn get_task_status_list() -> Vec<xTASK_STATUS> {
-	let num_tasks = /* not */ unsafe { uxTaskGetNumberOfTasks() };
+	let num_tasks = not_unsafe! { uxTaskGetNumberOfTasks() };
 
 	let mut buf = Vec::with_capacity(num_tasks as _);
 

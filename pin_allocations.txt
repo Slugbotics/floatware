@@ -1,5 +1,5 @@
  0:
- 1:
+ 1: Stepper UART RX + TX
  2: Onboard ARGB LED
  3: Leak detection
  4: SD SPI MOSI
@@ -9,7 +9,7 @@
  8: I2C SCL
  9: Onboard button
 10: I2C SDA
-18: Stepper UART RX + TX
-19:
+18: [USB]
+19: [USB]
 20: Stepper DIR
 21: Stepper STEP

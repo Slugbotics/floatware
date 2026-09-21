@@ -1,6 +1,6 @@
-# Rust often needs a bit of an extra main task stack size compared to C (the default is 3K)
-# You might have to increase this further if you allocate large stack variables in the main task
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+# Because we immediately spawn a new thread, the main thread memory usage is pretty small.
+# I believe that it tops out at 1332 bytes
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=1400
 
 # Increase a bit these stack sizes as they are also a bit too small by default
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
@@ -10,3 +10,9 @@ CONFIG_FREERTOS_IDLE_TASK_STACKSIZE=4096
 # that allocate large stack variables; or better yet - use 
 # `std::thread::Builder::new().stack_size(XXX)` for spawning
 CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=4096
+
+# Note that you need to prepend `CONFIG_` to the names you see in the Kconfig listings
+
+CONFIG_ESP_SYSTEM_USE_FRAME_POINTER=y
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y

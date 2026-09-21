@@ -15,62 +15,70 @@
 //! TODO: once I am done testing things with JSON typed into curl, port to MessagePack
 
 use crate::{
+	debugging::{
+		get_profiling_data,
+		get_tasks,
+	},
 	prelude::*,
-	set_boot_time, 
 	tasks::{
-		i2c::I2cCommand,
 		charter::CharterState,
-		shutdown::ShutdownRequest
-	}
+		i2c::I2cCommand,
+		shutdown::ShutdownRequest,
+	},
+	timekeeping::{get_on_duration, set_boot_timestamp}
 };
 
+use std::str::from_utf8;
+
 use esp_idf_svc::{
+	hal::task::block_on,
 	http::server::{
 		EspHttpConnection,
 		EspHttpServer
 	},
-	io::EspIOError,
-	hal::task::block_on
+	io::EspIOError
 };
 
 use embedded_svc::{
 	http::server::{
-		CompositeHandler, Handler, Middleware, Connection
+		CompositeHandler, Connection, Handler, Middleware
 	},
 	http::{
 		Headers, Method
 	},
-	io::{
-		Read
-	}
+	io::Read
 };
+
+use time::Timestamp;
 
 ////////////////////////////////////////////////////////////////////////////////
 
 pub fn initialize_http_server<'server>(
 	shutdown_signal_sender: &'static ShutdownSignal,
 	i2c_sender: I2cSender<'static>,
-	charter_state_sender: CharterStateSender<'static>
+	charter_state_sender: CharterStateSender<'static>,
 ) -> Result<EspHttpServer<'server>, EspIOError> {
 	let mut server = EspHttpServer::new(&Default::default())?;
 
 	server
-		.handler("/heartbeat",  Method::Get,  GetHeartbeat)?
-		.handler("/status",     Method::Get,  pep(GetStatus { i2c_sender }))?
-		.handler("/config",     Method::Post, pep(PostConfig {}))?
-		.handler("/shutdown",   Method::Post, pep(PostShutdown { shutdown_signal_sender }))?
-		.handler("/start_dive", Method::Post, pep(PostStartDive { charter_state_sender }))?
-		.handler("/time_sync",  Method::Post, pep(PostTimeSync))?
+		.handler("/heartbeat",    Method:: Get, GetHeartbeat)?
+		.handler("/status",       Method:: Get, pep(GetStatus { i2c_sender }))?
+		.handler("/profiling",    Method:: Get, pep(GetProfiling))?
+		.handler("/thread_info",  Method:: Get, pep(GetThreadInfo))?
+		.handler("/config",       Method::Post, pep(PostConfig {}))?
+		.handler("/shutdown",     Method::Post, pep(PostShutdown { shutdown_signal_sender }))?
+		.handler("/start_dive",   Method::Post, pep(PostStartDive { charter_state_sender }))?
+		.handler("/time_sync",    Method::Post, pep(PostTimeSync))?
 	;
+
+	info!("Server object successfully created");
 
 	Ok(server)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 
-// TODO: Maybe make a macro that generates these structs?
-
-/// Noop req. We don't use PlainErrorPage to make handling the connection faster.
+/// Noop request. We don't use PlainErrorPage to make handling the connection faster.
 struct GetHeartbeat;
 impl<'request> Handler<EspHttpConnection<'request>> for GetHeartbeat {
 	type Error = AnyhowError;
@@ -104,13 +112,57 @@ impl<'request> Handler<EspHttpConnection<'request>> for GetStatus {
 	}
 }
 
+struct GetProfiling;
+impl<'request> Handler<EspHttpConnection<'request>> for GetProfiling {
+	type Error = AnyhowError;
+
+	fn handle(&self, conn: &mut EspHttpConnection) -> Result<(), AnyhowError> {
+		let profiling = match get_profiling_data() {
+			Some(data) => data,
+			None => return reply(conn, 400, "Profiling not enabled".into()),
+		};
+
+		info!("{profiling:#?}");
+
+		match serde_json::to_string_pretty(profiling) {
+			Ok(json) => reply(conn, 200, json),
+			Err(error) => reply(conn, 500, error.to_string()),
+		}
+	}
+}
+
+struct GetThreadInfo;
+impl<'request> Handler<EspHttpConnection<'request>> for GetThreadInfo {
+	type Error = AnyhowError;
+
+	fn handle(&self, conn: &mut EspHttpConnection) -> Result<(), AnyhowError> {
+		let thread_info= get_tasks();
+
+		info!("{thread_info:?}");
+
+		match serde_json::to_string_pretty(&thread_info) {
+			Ok(json) => reply(conn, 200, json),
+			Err(error) => reply(conn, 500, error.to_string()),
+		}
+	}
+}
+
 struct PostTimeSync;
 impl<'request> Handler<EspHttpConnection<'request>> for PostTimeSync {
 	type Error = AnyhowError;
 
 	fn handle(&self, conn: &mut EspHttpConnection) -> Result<(), AnyhowError> {
 		// The control station will have to account for connection latency
-		set_boot_time(serde_json::from_slice(read_body(conn)?.as_slice())?);
+
+		let now: Timestamp = Timestamp::from_nanoseconds(
+			from_utf8(
+				&read_body(conn)?
+			)?.parse()?
+		)?;
+
+		if !set_boot_timestamp(now - get_on_duration()) {
+			return reply(conn, 409, "Time already set".into());
+		}
 
 		reply_204(conn)
 	}

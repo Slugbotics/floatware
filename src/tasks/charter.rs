@@ -1,27 +1,27 @@
 use crate::{
-	prelude::*
+	prelude::*,
+	tasks::{
+		stepper_controller::StepperState,
+		i2c::pressure_sensor::Depth
+	}
 };
 
 use std::{
+	fmt::{Display, Formatter, Result as FmtResult},
 	time::{
 		Duration,
 		Instant
-	},
-	fmt::{Display, Formatter, Result as FmtResult}
+	}
 };
 
 use embassy_time::WithTimeout;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-/// TODO based on I2C depth sensor driver code
-pub type Depth = f64;
-/// First argument is the amount of time after starting the dive that we should be
-/// at this [Depth]. The duration that we are at that depth is the following entry's
-/// [Duration] minus this one.
-/// 
-/// WARNING: durations of more than 584542 years may lead to an error in the sleep code.
-pub type DepthEntry = (Duration, Depth);
+/// First argument is the amount of time, in milliseconds, after starting the dive
+/// that we should be at this [Depth]. The duration that we are at that depth is the
+/// following entry's [Duration] minus this one.
+pub type DepthEntry = (u32, Depth);
 
 /// Maps the time after starting the descent, to a target depth.
 /// Note that the last entry will, for implementation reasons, always be effectively
@@ -49,10 +49,16 @@ pub enum CharterState {
 impl Display for CharterState {
 	fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
 		match self {
-			Self::StartRequested => f.write_str("StartRequested"),
-			Self::InProgress { charter_index, target_depth, charter_size } =>f.write_fmt(format_args!("InProgress {{ {charter_index}/{charter_size}: {target_depth} }}")),
-			Self::Completed => f.write_str("Completed"),
-			Self::Aborted { reason } => f.write_fmt(format_args!("Aborted {{ {reason} }}"))
+			Self::StartRequested =>
+				f.write_str("StartRequested"),
+			Self::InProgress { charter_index, target_depth, charter_size } =>
+				f.write_fmt(format_args!(
+					"InProgress {{ {charter_index}/{}: {target_depth} }}", charter_size - 1
+				)),
+			Self::Completed =>
+				f.write_str("Completed"),
+			Self::Aborted { reason } =>
+				f.write_fmt(format_args!("Aborted {{ {reason} }}"))
 		}
 	}
 }
@@ -67,7 +73,8 @@ impl Display for AbortReason {
 	fn fmt<'a>(&self, f: &mut Formatter<'_>) -> FmtResult {
 		match self {
 			AbortReason::CharterStateError { offending_charter_index } => {
-				f.write_fmt(format_args!("Invalid charter state: InProgress({offending_charter_index}) at beginning of depth_target_update_task"))
+				f.write_fmt(format_args!(
+					"Invalid charter state: InProgress({offending_charter_index}) at beginning of depth_target_update_task"))
 			}
 			AbortReason::Shutdown => f.write_str("Shutdown")
 		}
@@ -113,20 +120,24 @@ pub async fn depth_target_update_task(
 			charter_index, (target_start_time, target_depth)
 		) in charter.iter().enumerate() {
 			// Determine how much time we need to wait until `start_time` has passed since `start`
-			let time_since_start = Instant::now() - start;
+			let time_since_start = start.elapsed();
 
 			// We need to wait another (start_time - time_since_start)
+			let wait_time = Duration::from_millis
+				(*target_start_time as _).saturating_sub(time_since_start);
+
 			if sleep_and_check_aborted(
 				&mut charter_state_receiver,
-				target_start_time.saturating_sub(time_since_start)
+				wait_time
 			).await.is_some() {
+				info!("Depth target task: aborting charter");
 				// We are aborting, stop setting new charter states
 				continue 'enclosing;
 				// Depth control has also received this signal so there's no need to do anything
 			}
 
 			info!("New target: {target_depth:?}, {} seconds after start",
-				target_start_time.as_secs());
+				target_start_time / 1000);
 
 			// Because the esp32c3 is single-core, we avoid a race condition, wherein an Aborted
 			// value is inserted into the receiver between where we check for one above and where
@@ -136,21 +147,6 @@ pub async fn depth_target_update_task(
 			// so this would be a concern if it was possible for an Aborted value to be inserted
 			// into the sender from a different thread. However, it is not currently possible for
 			// that to happen, given the current architecture of the firmware.
-
-			// if {
-			// 	let aborted = RefCell::new(false);
-			// 	charter_state_sender.send_modify(|charter_state| {
-			// 		if let Some(CharterState::Aborted { reason }) = charter_state {
-			// 			error!("Charter aborted: {reason}");
-			// 			aborted.replace(true);
-			// 		} else {
-			// 			*charter_state = Some(CharterState::InProgress {
-			// 				charter_index, target_depth: *target_depth, charter_size
-			// 			});
-			// 		}
-			// 	});
-			// 	aborted.take()
-			// } { continue 'enclosing; }
 
 			charter_state_sender.send(CharterState::InProgress {
 				charter_index, target_depth: *target_depth, charter_size
@@ -167,7 +163,7 @@ pub async fn depth_target_update_task(
 /// the current depth closer to the target.
 pub async fn depth_control_task(
 	mut charter_state_receiver: CharterStateReceiver<'_>,
-	mut status_receiver: StatusReceiver<'_>,
+	mut status_receiver: SystemStatusReceiver<'_>,
 	// i2c_sender: I2cSender<'_>,
 	stepper_state_channel: &StepperStateSignal
 ) -> Void {
@@ -194,7 +190,7 @@ pub async fn depth_control_task(
 			charter_state_receiver.changed_and(charter_state_predicate).await
 		};
 
-		info!("Got state: {:?}", state);
+		info!("Depth control: got state: {:?}", state);
 
 		match state {
 			CharterState::InProgress { target_depth, .. } => {
@@ -203,6 +199,16 @@ pub async fn depth_control_task(
 				let current_depth = status_receiver.get().await.depth;
 
 				// TODO: adjust stepper to get closer to target, then sleep or something
+
+				stepper_state_channel.signal(
+					if current_depth > target_depth {
+						StepperState::WeAreTooLow
+					} else {
+						StepperState::WeAreTooHigh
+					}
+				);
+
+				sleep_and_check_aborted(&mut charter_state_receiver, Duration::from_millis(100)).await;
 			}
 			CharterState::Aborted { reason: AbortReason::Shutdown } => {
 				go_to_surface().await;
@@ -245,17 +251,3 @@ pub async fn depth_control_task(
 		Some(reason)
 	} else { None }
 }
-
-// #[inline] async fn sleep_and_check_aborted(
-// 	charter_state_receiver: &mut CharterStateReceiver<'_>,
-// 	duration: Duration,
-// ) -> Option<AbortReason> {
-// 	charter_state_receiver.changed_and(
-// 		|state| matches!(state, CharterState::Aborted { .. })
-// 	).with_timeout(
-// 		duration.try_into().unwrap() // Will fail if duration > 584542 years
-// 	).await.ok().map(|state| if let CharterState::Aborted { reason } = state {
-// 		error!("Charter aborted: {reason}");
-// 		reason
-// 	} else { unreachable!() })
-// }

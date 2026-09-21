@@ -1,19 +1,12 @@
-//! - [NoopRawMutex](embassy_sync::blocking_mutex::raw::NoopRawMutex): good only for
-//! signals within a single FreeRTOS task (i.e. one thread)
-//!
-//! - [EspRawMutex]: good for signals between FreeRTOS tasks
-//!
-//! - [CriticalSectionRawMutex](embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex):
-//! suitable for signals accessed by ISRs
-
 use crate::{
 	prelude::*,
 	tasks::{
 		i2c::I2cCommand,
 		charter::CharterState,
-		led::LEDState,
-		power_measurement::PowerMeasurement,
-		stepper_controller::StepperState,
+		led::LedState,
+		stepper_controller::{
+			StepperState,
+		},
 		shutdown::ShutdownRequest,
 		status::SystemStatus,
 	}
@@ -32,77 +25,79 @@ use embassy_sync::{
 		Watch,
 		Sender as WatchSender,
 		Receiver as WatchReceiver,
+	},
+	blocking_mutex::raw::{
+		NoopRawMutex,
+		CriticalSectionRawMutex
 	}
 };
 
-use futures::channel::oneshot::Sender;
+use smart_leds_trait::RGB8;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-// TODO: When finished, convert all the Watches that only have one reader into Signals
+/// Constructs a set of three [Watch] types with the given (or assumed) name: a
+/// normal (or "unsplit") watch, a receiver, and a sender.
+macro_rules! build_watch {
+    ($(#[$doc:meta])* $prefix:ident, $slot:ty, $mutex:ty, $recv_count:expr) => { ::paste::paste! {
+		$(#[$doc])* pub(crate) type [<$prefix UnsplitWatch>] = Watch        <    $mutex, $slot, $recv_count>;
+		$(#[$doc])* pub(crate) type [<$prefix Sender>]  <'a> = WatchSender  <'a, $mutex, $slot, $recv_count>;
+		$(#[$doc])* pub(crate) type [<$prefix Receiver>]<'a> = WatchReceiver<'a, $mutex, $slot, $recv_count>;
+	}};
+	($(#[$doc:meta])* $slot:ty, $mutex:ty, $recv_count:expr) => {
+		::paste::paste! {
+			build_watch!(
+				$(#[$doc])*
+				[<$slot>], $slot, $mutex, $recv_count);
+		}
+	};
+}
 
-/// Signal that tells the float-thread to exit. Uses [EspRawMutex] because can be
-/// written from the HTTP thread.
+/// Similar as above, but for a channel. Note that the number is the channel buffer
+/// queue depth; channels have no receiver limit.
+macro_rules! build_channel {
+    ($(#[$doc:meta])* $prefix:ident, $slot:ty, $mutex:ty, $buf_size:expr) => { ::paste::paste! {
+		$(#[$doc])* pub(crate) type [<$prefix UnsplitChannel>] = Channel        <    $mutex, $slot, $buf_size>;
+		$(#[$doc])* pub(crate) type [<$prefix Sender>]  <'a>   = ChannelSender  <'a, $mutex, $slot, $buf_size>;
+		$(#[$doc])* pub(crate) type [<$prefix Receiver>]<'a>   = ChannelReceiver<'a, $mutex, $slot, $buf_size>;
+	}};
+}
+
+/// Only safe for signals used within a single FreeRTOS task.
+type SingleTaskMutex = NoopRawMutex;
+/// Acceptable for signals accessed by multiple FreeRTOS tasks, but not interrupts.
+type MultiTaskMutex = EspRawMutex;
+/// Safe to use in interrupts and all places.
+type IsrMutex = CriticalSectionRawMutex;
+
+////////////////////////////////////////////////////////////////////////////////
+
+/// Signal that tells the float-thread to exit. Written from the HTTP `/shutdown`.
+pub(crate) type ShutdownSignal = Signal<MultiTaskMutex, ShutdownRequest>;
+
+/// Used to send commands to the stepper motor. Only used on float thread.
+pub(crate) type StepperStateSignal = Signal<SingleTaskMutex, StepperState>;
+
+/// Used to send LED color information between tasks. Only used on float thread.
+pub(crate) type LedColorSignal = Signal<SingleTaskMutex, RGB8>;
+
+/// Used to set the current LED cycle. Only used on float thread.
+pub(crate) type LedStateSignal = Signal<SingleTaskMutex, LedState>;
+
+build_watch!(
+/// Keeps track of the current [CharterState]; what we are currently doing on the
+/// dive. Empty means no dive has been started yet.
 ///
-/// Unit because the intent is marked by simple presence of the message. Once a
-/// message is sent on the channel, the system will shut down.
-pub(crate) type ShutdownSignal = Signal<EspRawMutex, ShutdownRequest>;
+/// Written by HTTP `/start_dive`.
+	CharterState, MultiTaskMutex, 3
+);
 
-// const SHUTDOWN_SIGNAL_RECEIVERS: usize = 2;
-// pub(crate) type ShutdownSignalUnsplitWatch = Watch<EspRawMutex, (), SHUTDOWN_SIGNAL_RECEIVERS>;
-// pub(crate) type ShutdownSignalReceiver<'a> = WatchReceiver<'a, EspRawMutex, (), SHUTDOWN_SIGNAL_RECEIVERS>;
-// pub(crate) type ShutdownSignalSender<'a> = WatchSender<'a, EspRawMutex, (), SHUTDOWN_SIGNAL_RECEIVERS>;
+build_watch!(
+/// Written from HTTP thread
+	SystemStatus, MultiTaskMutex, 3
+);
 
-
-const CHARTER_STATE_RECEIVERS: usize = 3;
-pub(crate) type CharterStateUnsplitWatch = Watch<EspRawMutex, CharterState, CHARTER_STATE_RECEIVERS>;
-pub(crate) type CharterStateReceiver<'a> = WatchReceiver<'a, EspRawMutex, CharterState, CHARTER_STATE_RECEIVERS>;
-pub(crate) type CharterStateSender<'a> = WatchSender<'a, EspRawMutex, CharterState, CHARTER_STATE_RECEIVERS>;
-
-pub(crate) type StepperStateSignal = Signal<EspRawMutex, StepperState>;
-
-pub(crate) type LedStateSignal = Signal<EspRawMutex, LEDState>;
-
-// TODO: perhaps make a macro to generate these
-
-// ==== System Config Channels ====
-
-// Instead of having a single big config struct, we have separate channels
-// (Watches, to be precise) that contain the system status, which tasks can
-// individually examine. That way, updates to unrelated configuration don't
-// unnecessarily wake unrelated tasks.
-
-
-// const CONFIG_CHARTER_RECEIVERS: usize = 2;
-// pub(crate) type ConfigCharterUnsplitWatch = Watch<EspRawMutex, Charter, CONFIG_CHARTER_RECEIVERS>;
-// pub(crate) type ConfigCharterReceiver<'a> = WatchReceiver<'a, EspRawMutex, Charter, CONFIG_CHARTER_RECEIVERS>;
-// pub(crate) type ConfigCharterSender<'a> = WatchSender<'a, EspRawMutex, Charter, CONFIG_CHARTER_RECEIVERS>;
-
-// ==== System Status Channels ====
-
-// In the same way, we don't have a big status struct and channel for it. We split.
-
-const POWER_MEASUREMENT_REQUEST_BUFFER_SIZE: usize = 8;
-pub(crate) type PowerMeasurementRequestUnsplitChannel = Channel<EspRawMutex, Sender<PowerMeasurement>, POWER_MEASUREMENT_REQUEST_BUFFER_SIZE>;
-pub(crate) type PowerMeasurementRequestReceiver<'a> = ChannelReceiver<'a, EspRawMutex, Sender<PowerMeasurement>, POWER_MEASUREMENT_REQUEST_BUFFER_SIZE>;
-pub(crate) type PowerMeasurementRequestSender<'a> = ChannelSender<'a, EspRawMutex, Sender<PowerMeasurement>, POWER_MEASUREMENT_REQUEST_BUFFER_SIZE>;
-
-const STATUS_RECEIVERS: usize = 2;
-pub(crate) type StatusUnsplitWatch = Watch<EspRawMutex, SystemStatus, STATUS_RECEIVERS>;
-pub(crate) type StatusReceiver<'a> = WatchReceiver<'a, EspRawMutex, SystemStatus, STATUS_RECEIVERS>;
-pub(crate) type StatusSender<'a> = WatchSender<'a, EspRawMutex, SystemStatus, STATUS_RECEIVERS>;
-
-// const CURRENT_DEPTH_RECEIVERS: usize = 2;
-// pub(crate) type CurrentDepthUnsplitWatch = Watch<EspRawMutex, Depth, CURRENT_DEPTH_RECEIVERS>;
-// pub(crate) type CurrentDepthReceiver<'a> = WatchReceiver<'a, EspRawMutex, Depth, CURRENT_DEPTH_RECEIVERS>;
-// pub(crate) type CurrentDepthSender<'a> = WatchSender<'a, EspRawMutex, Depth, CURRENT_DEPTH_RECEIVERS>;
-
-// ==== I2C Command Channels ====
-
-const I2C_BUFFER_SIZE: usize = 8;
-/// If this signature is updated, [i2c::i2c_thread] must also be updated.
-///
-/// TODO: check thread safety
-pub(crate) type I2cUnsplitChannel = Channel<EspRawMutex, I2cCommand, I2C_BUFFER_SIZE>;
-pub(crate) type I2cSender<'a> = ChannelSender<'a, EspRawMutex, I2cCommand, I2C_BUFFER_SIZE>;
-pub(crate) type I2cReceiver<'a> = ChannelReceiver<'a, EspRawMutex, I2cCommand, I2C_BUFFER_SIZE>;
+build_channel!(
+/// Used on I2C thread, obviously.
+	I2c, I2cCommand, MultiTaskMutex, 8
+);

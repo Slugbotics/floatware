@@ -1,37 +1,39 @@
-use crate::{
-	prelude::*,
-	tasks::{
-		*,
-		charter::{
-			depth_target_update_task,
-			depth_control_task
-		},
-		i2c::initialize_i2c_thread,
-		leak_detection::leak_detection_task,
-		power_measurement::power_measurement_task,
-		shutdown::Shutdown,
-		status::status_publishing_task,
-		stepper_controller::stepper_control_task,
-		sd_card::{
-			read_config_from_sd,
-			setup_sd_card,
-			mount_sd_card,
-			sd_logging_task
-		},
-		button::boot_button_pressed_task,
+use crate::{debugging::{
+	enable_profiling,
+	ProfilingData
+}, gpio, prelude::*, profile, tasks::{
+	button::boot_button_pressed_task,
+	charter::{
+		depth_control_task,
+		depth_target_update_task
 	},
-};
+	i2c::initialize_i2c_thread,
+	leak_detection::leak_detection_task,
+	led::{led_cycle_task, led_selection_task},
+	sd_card::{
+		mount_sd_card,
+		read_config_from_sd,
+		sd_logging_task,
+		setup_sd_card
+	},
+	shutdown::{
+		shutdown_task,
+		Shutdown,
+	},
+	status::status_publishing_task,
+	stepper_controller::stepper_control_task,
+}};
+
+use std::ptr::{read_volatile, write_volatile};
 
 use esp_idf_svc::{
 	eventloop::EspSystemEventLoop,
 	hal::{
-		peripherals::Peripherals,
-		gpio::{Gpio9, PinDriver, Pull}
+		gpio::{Gpio9, PinDriver, Pull},
+		peripherals::Peripherals
 	},
-	http::server::EspHttpServer,
 	nvs::EspDefaultNvsPartition,
-	timer::EspTaskTimerService,
-	sys::{uxTaskGetStackHighWaterMark2, xTaskGetCurrentTaskHandle},
+	timer::EspTaskTimerService
 };
 
 use ws2812_esp32_rmt_driver::{driver::color::LedPixelColorGrbw32, LedPixelEsp32Rmt, RGB8};
@@ -44,23 +46,15 @@ use ws2812_esp32_rmt_driver::{driver::color::LedPixelColorGrbw32, LedPixelEsp32R
 macro_rules! wrecv {
     ($channel:expr) => {
 		($channel).receiver()
-			.expect(concat!("Must increase max ", stringify!($channel), " receiver count"))
+			.ok_or(AnyhowError::msg(concat!("Must increase max ", stringify!($channel), " receiver count")))?
 	};
 }
+
 macro_rules! take {
     ($obj:ident) => {
 		$obj::take().map_err(damn!(concat!("Unable to acquire ", stringify!($obj))))?
 	};
 }
-
-// /// Creates an [EspAsyncTimer][esp_idf_svc::timer::EspAsyncTimer] using a provided
-// /// [EspTaskTimerService].
-// macro_rules! create_timer {
-//     ($service:expr) => {
-// 		($service).timer_async()
-// 			.map_err(damn!(concat!("Failed to create timer at ", file!(), ":", line!())))?
-// 	};
-// }
 
 // These are message channels that are shared across multiple threads. They need to
 // be `static` so we can be assured they will always exist for all threads to make
@@ -81,7 +75,7 @@ pub async fn float_thread() -> Void {
 	// Get handles to hardware resources
 
 	let mut peripherals = take!(Peripherals);
-	let should_reset = boot_button_pressed(&mut peripherals.pins.gpio9);
+	let should_reset = gpio::boot_button_pressed(&mut peripherals.pins.gpio9).await;
 
 	let sys_loop = take!(EspSystemEventLoop);
 	let timer_service = EspTaskTimerService::new()?;
@@ -90,18 +84,18 @@ pub async fn float_thread() -> Void {
 	////////////////////////////////////////
 	// Create non-static communication channels
 
-	let power_measurement_request_channel = PowerMeasurementRequestUnsplitChannel::new();
-	let status_channel = StatusUnsplitWatch::new();
+	let status_channel = SystemStatusUnsplitWatch::new();
 	let led_state_channel = LedStateSignal::new();
 	let stepper_state_channel = StepperStateSignal::new();
+	let button_led_signal = LedColorSignal::new();
 
 	////////////////////////////////////////
 	// Initialize external free-running systems
 
 	let sd_card_driver = setup_sd_card(
 		peripherals.spi2, // SPI1 is very limited
-		peripherals.pins.gpio4, // SCLK
-		peripherals.pins.gpio5, // MOSI
+		peripherals.pins.gpio5, // SCLK
+		peripherals.pins.gpio4, // MOSI
 		peripherals.pins.gpio6, // MISO
 		peripherals.pins.gpio7, // CS
 	).map(Some).unwrap_or_else(|error| {
@@ -129,6 +123,8 @@ pub async fn float_thread() -> Void {
 
 	info!("Using {config:#?}");
 
+	if config.profiling { enable_profiling() }
+
 	let _wifi = wifi::initialize_wifi(
 		peripherals.modem,
 		&sys_loop,
@@ -145,7 +141,7 @@ pub async fn float_thread() -> Void {
 		I2C_CHANNEL.receiver()
 	).map_err(damn!("Failed to initialize I2C thread"))?;
 
-	let _http_server: EspHttpServer = http::initialize_http_server(
+	let _http_server = http::initialize_http_server(
 		&SHUTDOWN_CHANNEL,
 		I2C_CHANNEL.sender(),
 		CHARTER_STATE_CHANNEL.sender(),
@@ -163,56 +159,56 @@ pub async fn float_thread() -> Void {
 
 	// Any task returning an error leads to an immediate shutdown
 	let Err(error) = futures::try_join!(
-		led::led_task(
-			led_driver,
-			&led_state_channel, // reader
-		),
-		shutdown::shutdown_task(
-			&SHUTDOWN_CHANNEL, // reader
-			CHARTER_STATE_CHANNEL.sender()
-		),
-		depth_target_update_task(
+		// ========== Peripheral Management ==========
+		profile!(depth_target_update_task(
 			wrecv!(CHARTER_STATE_CHANNEL),
 			CHARTER_STATE_CHANNEL.sender(),
 			&config.charter,
-		),
-		depth_control_task(
+		)),
+		profile!(depth_control_task(
 			wrecv!(CHARTER_STATE_CHANNEL),
 			wrecv!(status_channel),
 			&stepper_state_channel, // writer
-		),
-		leak_detection_task(
+		)),
+		// profile!(stepper_control_task(
+		// 	peripherals.uart1,
+		// 	peripherals.pins.gpio1.into(), // RX + TX
+		// 	peripherals.pins.gpio20, // dir
+		// 	peripherals.pins.gpio21, // step
+		// 	&stepper_state_channel, // reader
+		// )),
+		profile!(leak_detection_task(
 			peripherals.pins.gpio3,
 			&SHUTDOWN_CHANNEL, // writer
-		),
-		power_measurement_task(
-			peripherals.adc1,
-			peripherals.pins.gpio0, // voltage ADC
-			peripherals.pins.gpio1, // current ADC
-			power_measurement_request_channel.receiver(),
-		),
-		stepper_control_task(
-			peripherals.uart0,
-			peripherals.pins.gpio20, // RX
-			peripherals.pins.gpio21, // TX
-			peripherals.pins.gpio18, // dir
-			peripherals.pins.gpio19, // step
-			&stepper_state_channel, // reader
-		),
-		status_publishing_task(
-			power_measurement_request_channel.sender(),
+		)),
+		// ========== I/O ==========
+		profile!(boot_button_pressed_task(
+			peripherals.pins.gpio9,
+			&button_led_signal, // writer
+		)),
+		profile!(led_selection_task(
+			&led_state_channel, // writer
+			wrecv!(status_channel),
+			&button_led_signal, // reader
+		)),
+		profile!(led_cycle_task(
+			led_driver,
+			&led_state_channel, // reader
+		)),
+		profile!(sd_logging_task(
+			wrecv!(status_channel),
+			&sd_fs_handle,
+		)),
+		// ========== Internal Housekeeping ==========
+		profile!(status_publishing_task(
 			status_channel.sender(),
 			I2C_CHANNEL.sender(),
 			wrecv!(CHARTER_STATE_CHANNEL),
-			&led_state_channel, // writer
-		),
-		boot_button_pressed_task(
-			peripherals.pins.gpio9
-		),
-		sd_logging_task(
-			wrecv!(status_channel),
-			&sd_fs_handle,
-		)
+		)),
+		profile!(shutdown_task(
+			&SHUTDOWN_CHANNEL, // reader
+			CHARTER_STATE_CHANNEL.sender()
+		)),
 	);
 
 	// The shutdown task has a unique error that it returns to indicate a normal shutdown
@@ -221,29 +217,5 @@ pub async fn float_thread() -> Void {
 		Ok(())
 	} else {
 		Err(error)
-	}
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-/// Return the minimum recorded amount of stack space (in bytes) remaining for the
-/// calling thread. It should go without saying, but don't call this from an
-/// interrupt (I don't know what will happen in that case, but probably nothing
-/// good)
-fn high_water_mark() -> u32 { unsafe { uxTaskGetStackHighWaterMark2(xTaskGetCurrentTaskHandle()) } }
-
-/// Creates a short-lived input driver to read the state of GPIO9's button.
-fn boot_button_pressed(input: &mut Gpio9) -> bool {
-	match PinDriver::input(
-		// We need (temporary) ownership of the pin, so we reborrow it, knowing that the
-		// driver that owns this reference will be dropped at the end of this block.
-		unsafe { input.reborrow() },
-		Pull::Up
-	) {
-		Ok(driver) => driver.is_low(),
-		Err(error) => {
-			warn!("Unable to create input driver to check boot button: {error:#?}");
-			false
-		}
 	}
 }

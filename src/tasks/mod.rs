@@ -5,7 +5,6 @@ pub mod shutdown;
 pub mod i2c;
 pub mod charter;
 pub mod leak_detection;
-pub mod power_measurement;
 pub mod stepper_controller;
 pub mod sd_card;
 pub mod status;
